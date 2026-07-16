@@ -231,6 +231,9 @@ export default function App() {
   }, []);
 
   const [selectedReportAccount, setSelectedReportAccount] = useState<string>('ALL_ACCOUNTS');
+  const [selectedAccounts, setSelectedAccounts] = useState<string[]>([]);
+  const [isAccountDropdownOpen, setIsAccountDropdownOpen] = useState<boolean>(false);
+  const accountDropdownRef = useRef<HTMLDivElement>(null);
   const [availableAccounts, setAvailableAccounts] = useState<string[]>([]);
 
   // 走势分析状态
@@ -566,13 +569,21 @@ export default function App() {
   const [transferAmount, setTransferAmount] = useState('');
   const [isTransferring, setIsTransferring] = useState(false);
 
+  // 过滤后的仓位历史记录 (按选中的账户过滤)
+  const filteredHistory = React.useMemo(() => {
+    if (selectedAccounts.length === 0) {
+      return positionHistory;
+    }
+    return positionHistory.filter(h => h.account && selectedAccounts.includes(h.account));
+  }, [positionHistory, selectedAccounts]);
+
   // Calculate win/loss streaks for the chart
   const chartData = React.useMemo(() => {
     const streaks: any[] = [];
-    if (positionHistory.length > 0) {
-      // positionHistory is sorted by timestamp DESC (newest first)
+    if (filteredHistory.length > 0) {
+      // filteredHistory is sorted by timestamp DESC (newest first)
       // We need to process from oldest to newest for streaks
-      const sortedHistory = [...positionHistory].sort((a, b) => a.timestamp - b.timestamp);
+      const sortedHistory = [...filteredHistory].sort((a, b) => a.timestamp - b.timestamp);
       
       let currentStreak: any = null;
       
@@ -596,11 +607,11 @@ export default function App() {
       isWin: s.isWin,
       color: s.isWin ? '#10B981' : '#EF4444'
     }));
-  }, [positionHistory]);
+  }, [filteredHistory]);
 
   // 通过点击选择时段或点击分析主动对当前选中账户的“仓位历史记录”进行数据分析
   const handleAnalyzeTrend = useCallback((overrideTimeframe?: '1h' | '4h' | '1d' | '1w' | '1M') => {
-    if (positionHistory.length === 0) {
+    if (filteredHistory.length === 0) {
       setTrendCandles([]);
       return;
     }
@@ -608,7 +619,7 @@ export default function App() {
     const activeTimeframe = overrideTimeframe || trendTimeframe;
 
     // 按平仓时间/最后平仓时间进行升序排序
-    const sorted = [...positionHistory].sort((a, b) => {
+    const sorted = [...filteredHistory].sort((a, b) => {
       const timeA = a.closeTime || a.timestamp || 0;
       const timeB = b.closeTime || b.timestamp || 0;
       return timeA - timeB;
@@ -671,7 +682,7 @@ export default function App() {
       const low = Math.min(open, close, ...balances);
       const pnlSum = pts.reduce((sum, p) => sum + p.pnl, 0);
 
-      const tradesCount = positionHistory.filter(item => {
+      const tradesCount = filteredHistory.filter(item => {
         const itemOpenTime = item.openTime || item.timestamp || 0;
         return getGroupKey(itemOpenTime, activeTimeframe) === key;
       }).length;
@@ -680,7 +691,7 @@ export default function App() {
         name: key,
         open,
         high,
-         low,
+        low,
         close,
         range: [Math.min(open, close), Math.max(open, close)],
         pnlSum,
@@ -694,12 +705,12 @@ export default function App() {
     setTrendCandles(candlesList);
     // 重置缩放区间为全幅，使得新图可以立刻完整地展示
     setTrendZoomInfo({ startIndex: 0, viewLen: candlesList.length });
-  }, [positionHistory, trendInitialBalance, trendTimeframe]);
+  }, [filteredHistory, trendInitialBalance, trendTimeframe]);
 
-  // 当仓位交易历史、初始资金改变时，重置并清空走势分析 (不再进行自动分析)
+  // 当仓位交易历史、过滤账户、初始资金改变时，重置并清空走势分析
   useEffect(() => {
     setTrendCandles([]);
-  }, [positionHistory, trendInitialBalance]);
+  }, [filteredHistory, trendInitialBalance]);
 
   // 可见区间的 K线 数据（支持缩放和游走）
   const visibleTrendCandles = React.useMemo(() => {
@@ -732,7 +743,7 @@ export default function App() {
   }, [chartData, streakZoomInfo]);
 
   const historyTotals = React.useMemo(() => {
-    return positionHistory.reduce((acc, curr) => {
+    return filteredHistory.reduce((acc, curr) => {
       acc.totalPnl += curr.pnl;
       acc.totalCommission += curr.commission;
       acc.totalFunding += curr.fundingFee;
@@ -740,7 +751,7 @@ export default function App() {
       if (curr.pnl > 0) acc.wins += 1;
       return acc;
     }, { totalPnl: 0, totalCommission: 0, totalFunding: 0, wins: 0, totalTrades: 0 });
-  }, [positionHistory]);
+  }, [filteredHistory]);
 
   // 走势分析鼠标滚轮监听
   useEffect(() => {
@@ -816,7 +827,7 @@ export default function App() {
   // Reset pagination on history changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [positionHistory]);
+  }, [filteredHistory]);
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -2395,7 +2406,7 @@ export default function App() {
   };
 
   const exportToExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(positionHistory.map(h => ({
+    const ws = XLSX.utils.json_to_sheet(filteredHistory.map(h => ({
       '合约名称': h.symbol,
       '订单类型': h.side === 'BUY' ? '多单' : '空单',
       '账户': h.account || '默认账户',
@@ -3463,18 +3474,98 @@ export default function App() {
               </div>
 
               <div className="flex flex-wrap items-center gap-3">
-                <div className="flex items-center gap-2 bg-[#1C1C1E] px-3 py-1.5 rounded border border-[#232326]">
-                  <span className="text-[10px] text-zinc-500 uppercase">账目</span>
-                  <select
-                    value={selectedReportAccount}
-                    onChange={e => setSelectedReportAccount(e.target.value)}
-                    className="bg-transparent text-xs text-white outline-none border-none cursor-pointer focus:outline-none"
+                <div className="relative" ref={accountDropdownRef}>
+                  <button
+                    onClick={() => setIsAccountDropdownOpen(!isAccountDropdownOpen)}
+                    className="flex items-center gap-2 bg-[#1C1C1E] px-3 py-1.5 rounded border border-[#232326] text-xs text-white hover:border-zinc-700 transition-colors select-none"
                   >
-                    <option value="" className="bg-[#1C1C1E] text-[#9EA1A6]">所有账户</option>
-                    {availableAccounts.map(acc => (
-                      <option key={acc} value={acc} className="bg-[#1C1C1E] text-zinc-300">{acc}</option>
-                    ))}
-                  </select>
+                    <span className="text-[10px] text-zinc-500 uppercase">账目:</span>
+                    <span className="font-semibold text-zinc-200">
+                      {selectedAccounts.length === 0 ? '所有账户' : `已选 ${selectedAccounts.length} 个账户`}
+                    </span>
+                    <ChevronDown size={14} className="text-zinc-500" />
+                  </button>
+
+                  <AnimatePresence>
+                    {isAccountDropdownOpen && (
+                      <motion.div
+                        initial={{ opacity: 0, y: 8 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: 8 }}
+                        className="absolute right-0 mt-2 w-56 bg-[#141416] border border-[#232326] rounded-lg shadow-xl z-50 py-2 space-y-1 backdrop-blur-md"
+                      >
+                        {/* Select All Row */}
+                        <div 
+                          onClick={() => setSelectedAccounts([])}
+                          className="flex items-center gap-2.5 px-3 py-2 hover:bg-[#1C1C1E]/60 cursor-pointer select-none transition-colors group"
+                        >
+                          <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center transition-all ${
+                            selectedAccounts.length === 0 
+                              ? 'bg-blue-500 border-blue-500 text-white' 
+                              : 'border-zinc-600 group-hover:border-zinc-500'
+                          }`}>
+                            {selectedAccounts.length === 0 && (
+                              <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                              </svg>
+                            )}
+                          </div>
+                          <span className={`text-xs ${selectedAccounts.length === 0 ? 'text-white font-medium' : 'text-zinc-400 group-hover:text-zinc-300'}`}>
+                            所有账户 (全选)
+                          </span>
+                        </div>
+
+                        <div className="border-t border-[#232326] my-1.5" />
+
+                        {/* Individual Account Rows */}
+                        <div className="max-h-48 overflow-y-auto space-y-0.5 pr-1">
+                          {availableAccounts.map(acc => {
+                            const isChecked = selectedAccounts.length === 0 || selectedAccounts.includes(acc);
+                            return (
+                              <div
+                                key={acc}
+                                onClick={() => {
+                                  if (selectedAccounts.length === 0) {
+                                    // If "All" was active, and they select one, that unchecks the others.
+                                    const others = availableAccounts.filter(a => a !== acc);
+                                    setSelectedAccounts(others);
+                                  } else {
+                                    if (selectedAccounts.includes(acc)) {
+                                      const next = selectedAccounts.filter(a => a !== acc);
+                                      setSelectedAccounts(next);
+                                    } else {
+                                      const next = [...selectedAccounts, acc];
+                                      if (next.length === availableAccounts.length) {
+                                        setSelectedAccounts([]);
+                                      } else {
+                                        setSelectedAccounts(next);
+                                      }
+                                    }
+                                  }
+                                }}
+                                className="flex items-center gap-2.5 px-3 py-1.5 hover:bg-[#1C1C1E]/60 cursor-pointer select-none transition-colors group"
+                              >
+                                <div className={`w-3.5 h-3.5 rounded border flex items-center justify-center transition-all ${
+                                  isChecked 
+                                    ? 'bg-blue-500 border-blue-500 text-white' 
+                                    : 'border-zinc-600 group-hover:border-zinc-500'
+                                }`}>
+                                  {isChecked && (
+                                    <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
+                                    </svg>
+                                  )}
+                                </div>
+                                <span className={`text-xs ${isChecked ? 'text-white font-medium' : 'text-zinc-400 group-hover:text-zinc-300'}`}>
+                                  {acc}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
                 <div className="flex items-center gap-2 bg-[#1C1C1E] px-3 py-1.5 rounded border border-[#232326]">
                   <span className="text-[10px] text-zinc-500 uppercase">开始</span>
@@ -3498,7 +3589,7 @@ export default function App() {
                 </div>
                 <button 
                   onClick={exportToExcel}
-                  disabled={positionHistory.length === 0}
+                  disabled={filteredHistory.length === 0}
                   className="flex items-center gap-2 px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-xs font-bold rounded transition-colors disabled:opacity-50"
                 >
                   <Download size={14} />
@@ -3553,14 +3644,14 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#232326]">
-                  {positionHistory.length === 0 ? (
+                  {filteredHistory.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="px-5 py-12 text-center text-zinc-600 italic text-sm">
                         暂无历史记录。
                       </td>
                     </tr>
                   ) : (
-                    positionHistory.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE).map((h) => (
+                    filteredHistory.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE).map((h) => (
                       <tr key={h.id} className="hover:bg-[#1C1C1E]/50 transition-colors">
                         <td className="px-5 py-4">
                           <div className="font-bold text-sm">{h.symbol}</div>
@@ -3615,10 +3706,10 @@ export default function App() {
             </div>
 
             {/* Pagination Controls */}
-            {positionHistory.length > ITEMS_PER_PAGE && (
+            {filteredHistory.length > ITEMS_PER_PAGE && (
               <div className="flex flex-col sm:flex-row items-center justify-between px-5 py-4 border-t border-[#232326] gap-4 bg-[#1C1C1E]/20">
                 <span className="text-xs text-zinc-500 font-mono">
-                  显示第 {(currentPage - 1) * ITEMS_PER_PAGE + 1} 至 {Math.min(currentPage * ITEMS_PER_PAGE, positionHistory.length)} 条，共 {positionHistory.length} 条记录
+                  显示第 {(currentPage - 1) * ITEMS_PER_PAGE + 1} 至 {Math.min(currentPage * ITEMS_PER_PAGE, filteredHistory.length)} 条，共 {filteredHistory.length} 条记录
                 </span>
                 <div className="flex items-center gap-1.5">
                   <button
@@ -3636,18 +3727,18 @@ export default function App() {
                     上一页
                   </button>
                   <span className="text-xs text-zinc-400 px-3 py-1 bg-black/30 border border-[#232326] rounded font-mono">
-                    {currentPage} / {Math.ceil(positionHistory.length / ITEMS_PER_PAGE)}
+                    {currentPage} / {Math.ceil(filteredHistory.length / ITEMS_PER_PAGE)}
                   </span>
                   <button
-                    onClick={() => setCurrentPage(prev => Math.min(Math.ceil(positionHistory.length / ITEMS_PER_PAGE), prev + 1))}
-                    disabled={currentPage === Math.ceil(positionHistory.length / ITEMS_PER_PAGE)}
+                    onClick={() => setCurrentPage(prev => Math.min(Math.ceil(filteredHistory.length / ITEMS_PER_PAGE), prev + 1))}
+                    disabled={currentPage === Math.ceil(filteredHistory.length / ITEMS_PER_PAGE)}
                     className="px-2.5 py-1.5 bg-[#1C1C1E] border border-[#232326] text-[11px] text-zinc-400 rounded hover:bg-[#232326] disabled:opacity-30 disabled:hover:bg-[#1C1C1E] transition-all"
                   >
                     下一页
                   </button>
                   <button
-                    onClick={() => setCurrentPage(Math.ceil(positionHistory.length / ITEMS_PER_PAGE))}
-                    disabled={currentPage === Math.ceil(positionHistory.length / ITEMS_PER_PAGE)}
+                    onClick={() => setCurrentPage(Math.ceil(filteredHistory.length / ITEMS_PER_PAGE))}
+                    disabled={currentPage === Math.ceil(filteredHistory.length / ITEMS_PER_PAGE)}
                     className="px-2.5 py-1.5 bg-[#1C1C1E] border border-[#232326] text-[11px] text-zinc-400 rounded hover:bg-[#232326] disabled:opacity-30 disabled:hover:bg-[#1C1C1E] transition-all"
                   >
                     末页
