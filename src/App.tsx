@@ -2424,13 +2424,24 @@ export default function App() {
     XLSX.writeFile(wb, `PositionHistory_${new Date().getTime()}.xlsx`);
   };
 
-  const syncSingleAccount = async (accountName: string, apiKey: string, apiSecret: string, isBulk: boolean = false) => {
-    // Stage update
-    setSyncProgress({ current: 0, total: 0, stage: `[${accountName}] 正在查询本地数据库时间范围...` });
+  const fetchHistoryFromBinance = async () => {
+    if (!isConnected) {
+      addLog('获取历史失败: API 未连接', 'ERROR');
+      return;
+    }
+
+    const activeAccount = apiConfig.accountName || '';
+    if (!activeAccount) {
+      addLog('获取历史失败: 请先在币安 API 配置板块录入账户名', 'ERROR');
+      return;
+    }
+
+    setIsFetchingHistory(true);
+    setSyncProgress({ current: 0, total: 0, stage: '正在查询本地数据库时间范围...' });
 
     try {
       // 1. Get existing history for this account from DB
-      const localRes = await fetch(`/api/position-history?account=${encodeURIComponent(accountName)}`);
+      const localRes = await fetch(`/api/position-history?account=${encodeURIComponent(activeAccount)}`);
       if (!localRes.ok) throw new Error('Failed to fetch local history');
       const localHistory: PositionHistory[] = await localRes.json();
 
@@ -2470,8 +2481,8 @@ export default function App() {
                 method,
                 endpoint,
                 params,
-                apiKey: apiKey,
-                apiSecret: apiSecret
+                apiKey: apiConfig.apiKey,
+                apiSecret: apiConfig.apiSecret
               })
             });
 
@@ -2502,17 +2513,16 @@ export default function App() {
       };
 
       if (missingRanges.length === 0) {
-        addLog(`💡 优先本地检索：所选账号 [${accountName}] 请求时间段的数据已完全包含在本地数据库中！本次直接极速展示本地存储对账记录，已大幅节省币安接口调用。`, 'SUCCESS');
-        if (!isBulk) {
-          // Load the updated history from local DB for ALL accounts, filtered to the user selected range, so other accounts are not lost from UI
-          const allRes = await fetch('/api/position-history');
-          if (allRes.ok) {
-            const allHistoryList: PositionHistory[] = await allRes.json();
-            const filteredList = allHistoryList.filter(h => h.openTime >= requestedStartTime && h.closeTime <= requestedEndTime);
-            setPositionHistory(filteredList);
-          }
+        addLog(`💡 优先本地检索：所选账号 [${activeAccount}] 请求时间段的数据已完全包含在本地数据库中！本次直接极速展示本地存储对账记录，已大幅节省币安接口调用。`, 'SUCCESS');
+        // Load the updated history from local DB for ALL accounts, filtered to the user selected range, so other accounts are not lost from UI
+        const allRes = await fetch('/api/position-history');
+        if (allRes.ok) {
+          const allHistoryList: PositionHistory[] = await allRes.json();
+          const filteredList = allHistoryList.filter(h => h.openTime >= requestedStartTime && h.closeTime <= requestedEndTime);
+          setPositionHistory(filteredList);
         }
-        return true;
+        setIsFetchingHistory(false);
+        return;
       }
 
       // We have missing ranges! Let's fetch them from Binance and supplement the local DB
@@ -2523,8 +2533,8 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             endpoint: '/fapi/v2/positionRisk',
-            apiKey: apiKey,
-            apiSecret: apiSecret
+            apiKey: apiConfig.apiKey,
+            apiSecret: apiConfig.apiSecret
           })
         });
         if (posResponse.ok) {
@@ -2545,15 +2555,15 @@ export default function App() {
 
       if (activePositions.length > 0) {
         const details = activePositions.map(p => `${p.symbol} (${p.side === 'BUY' ? '做多' : '做空'} ${p.amount})`).join(', ');
-        addLog(`[${accountName}] 当前存在活跃持仓: ${details}。生成历史闭环仓位时，将自动精准剔除这些持仓最近的开仓成交数据。`, 'INFO');
+        addLog(`当前存在活跃持仓: ${details}。生成历史闭环仓位时，将自动精准剔除这些持仓最近的开仓成交数据。`, 'INFO');
       } else {
-        addLog(`[${accountName}] 当前无活跃持仓，将完整分析并闭环缺失区段的全部历史成交。`, 'INFO');
+        addLog(`当前无活跃持仓，将完整分析并闭环缺失区段的全部历史成交。`, 'INFO');
       }
 
       let allNewMatchedHistory: PositionHistory[] = [];
 
       for (const range of missingRanges) {
-        addLog(`正在从币安拉取账户 [${accountName}] 缺失时间段的流水 [时间: ${new Date(range.startTime).toLocaleDateString()} 至 ${new Date(range.endTime).toLocaleDateString()}]...`, 'INFO');
+        addLog(`正在从币安拉取缺失时间段的流水 [时间: ${new Date(range.startTime).toLocaleDateString()} 至 ${new Date(range.endTime).toLocaleDateString()}]...`, 'INFO');
         
         const startTime = range.startTime;
         const endTime = range.endTime;
@@ -2572,7 +2582,7 @@ export default function App() {
             setSyncProgress({
               current: 0,
               total: 0,
-              stage: `正在获取 [${accountName}] 缺失区间收入流水 [${new Date(fetchStart).toLocaleDateString()} - ${new Date(fetchEnd).toLocaleDateString()}]...`
+              stage: `正在获取缺失区间收入流水 [${new Date(fetchStart).toLocaleDateString()} - ${new Date(fetchEnd).toLocaleDateString()}]...`
             });
 
             const res = await binanceRequestWithRetry('/fapi/v1/income', {
@@ -2583,8 +2593,9 @@ export default function App() {
 
             if (!res.ok || !Array.isArray(res.data)) {
               const errMsg = res.data && res.data.msg ? res.data.msg : '未知错误';
-              addLog(`获取 [${accountName}] 收入历史失败 [${new Date(fetchStart).toLocaleDateString()} - ${new Date(fetchEnd).toLocaleDateString()}]: ${errMsg}`, 'ERROR');
-              return false;
+              addLog(`获取收入历史失败 [${new Date(fetchStart).toLocaleDateString()} - ${new Date(fetchEnd).toLocaleDateString()}]: ${errMsg}`, 'ERROR');
+              setIsFetchingHistory(false);
+              return;
             }
 
             const income = res.data;
@@ -2616,7 +2627,7 @@ export default function App() {
           continue; // No trade activity in this segment, skip to next missing range
         }
 
-        addLog(`发现 [${accountName}] 缺失区间内存在 ${activeSymbols.length} 个活跃合约，正在抓取详细成交记录进行平仓配对...`, 'INFO');
+        addLog(`发现缺失区间内存在 ${activeSymbols.length} 个活跃合约，正在抓取详细成交记录进行平仓配对...`, 'INFO');
 
         // 3. fetch detailed trades
         let allTrades: any[] = [];
@@ -2631,7 +2642,7 @@ export default function App() {
             setSyncProgress({
               current: symbolIndex,
               total: activeSymbols.length,
-              stage: `[${accountName}] 正在抓取 [${symbol}] 数据 [${new Date(chunkStart).toLocaleDateString()} - ${new Date(chunkEnd).toLocaleDateString()}] (${symbolIndex}/${activeSymbols.length})`
+              stage: `正在抓取 [${symbol}] 数据 [${new Date(chunkStart).toLocaleDateString()} - ${new Date(chunkEnd).toLocaleDateString()}] (${symbolIndex}/${activeSymbols.length})`
             });
 
             while (fetchStart <= chunkEnd) {
@@ -2837,7 +2848,7 @@ export default function App() {
                 const finalPnl = sumRealizedPnl - sumCommission + fundingFee;
 
                 segmentMatchedHistory.push({
-                  id: accountName + '_' + closeTrade.id + '_' + matchedOpenTrades.map(o => o.trade.id).join('_'),
+                  id: activeAccount + '_' + closeTrade.id + '_' + matchedOpenTrades.map(o => o.trade.id).join('_'),
                   symbol: symbol,
                   side: openSide,
                   positionSide: closeTrade.positionSide || (openSide === 'BUY' ? 'LONG' : 'SHORT'),
@@ -2852,7 +2863,7 @@ export default function App() {
                   openTime: earliestOpenTime,
                   closeTime: latestCloseTime,
                   timestamp: latestCloseTime,
-                  account: accountName
+                  account: activeAccount
                 });
               }
             }
@@ -2901,121 +2912,36 @@ export default function App() {
 
       // Save all newly matched records to local SQLite
       if (allNewMatchedHistory.length > 0) {
-        addLog(`[${accountName}] 成功获取并计算出缺失区段的 ${allNewMatchedHistory.length} 条全新仓位历史记录，正在持久化补全本地数据库...`, 'SUCCESS');
+        addLog(`成功获取并计算出缺失区段的 ${allNewMatchedHistory.length} 条全新仓位历史记录，正在持久化补全本地数据库...`, 'SUCCESS');
         const dbSaveRes = await fetch('/api/position-history', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ history: allNewMatchedHistory })
         });
         if (dbSaveRes.ok) {
-          addLog(`[${accountName}] 已成功补全本地 SQLite 数据库，已对新产生的 ${allNewMatchedHistory.length} 条记录进行了补足。`, 'SUCCESS');
+          addLog(`已成功补全本地 SQLite 数据库，已对新产生的 ${allNewMatchedHistory.length} 条记录进行了补足。`, 'SUCCESS');
         }
       } else {
-        addLog(`[${accountName}] 未在缺失区段发现任何需要补全的平仓成交记录。`, 'INFO');
+        addLog('未在缺失区段发现任何需要补全的平仓成交记录。', 'INFO');
       }
 
-      return true;
-
-    } catch (error) {
-      console.error(error);
-      addLog(`[${accountName}] 获取历史记录并进行闭环汇总时发生异常`, 'ERROR');
-      return false;
-    }
-  };
-
-  const fetchHistoryFromBinance = async () => {
-    if (!isConnected) {
-      addLog('获取历史失败: API 未连接', 'ERROR');
-      return;
-    }
-
-    const activeAccount = apiConfig.accountName || '';
-    if (!activeAccount) {
-      addLog('获取历史失败: 请先在币安 API 配置板块录入账户名', 'ERROR');
-      return;
-    }
-
-    setIsFetchingHistory(true);
-    try {
-      const success = await syncSingleAccount(activeAccount, apiConfig.apiKey, apiConfig.apiSecret, false);
-      if (success) {
-        const requestedStartTime = new Date(dateRange.start + 'T00:00:00').getTime();
-        const requestedEndTime = new Date(dateRange.end + 'T23:59:59.999').getTime();
-        // Reload the updated history from local DB for ALL accounts, filtered to the user selected range
-        const updatedLocalRes = await fetch('/api/position-history');
-        if (updatedLocalRes.ok) {
-          const fullHistoryList: PositionHistory[] = await updatedLocalRes.json();
-          const filteredList = fullHistoryList.filter(h => h.openTime >= requestedStartTime && h.closeTime <= requestedEndTime);
-          setPositionHistory(filteredList);
-          // Set selectedReportAccount to 'ALL_ACCOUNTS' to prevent single account triggers that overwrite the state
-          setSelectedReportAccount('ALL_ACCOUNTS');
-          addLog(`同步补全完成！当前时间段 [${dateRange.start} 至 ${dateRange.end}] 共计 ${filteredList.filter(h => h.account === activeAccount).length} 条 [${activeAccount}] 的独立闭合仓位记录已成功加载展示，其他账户记录已保留。`, 'SUCCESS');
-        }
-
-        // Fetch the available accounts list as well so the dropdown stays in sync
-        fetchAvailableAccounts();
-      }
-    } finally {
-      setIsFetchingHistory(false);
-    }
-  };
-
-  const syncAllAccountsHistory = async () => {
-    setIsFetchingHistory(true);
-    addLog('正在从本地数据库加载所有已保存账户的 API 凭证...', 'INFO');
-    try {
-      const res = await fetch('/api/api-credentials');
-      if (!res.ok) {
-        addLog('全部同步失败: 无法获取已保存账户列表', 'ERROR');
-        setIsFetchingHistory(false);
-        return;
-      }
-      const accountsList = await res.json();
-      if (!Array.isArray(accountsList) || accountsList.length === 0) {
-        addLog('全部同步失败: 本地没有已保存的账户凭证。请先在“TRADE”标签页配置并验证 API 连接。', 'ERROR');
-        setIsFetchingHistory(false);
-        return;
-      }
-
-      addLog(`开始一键全部同步，共计检测到 ${accountsList.length} 个账户凭证。将逐一进行流水抓取与平仓配对分析...`, 'INFO');
-
-      let successCount = 0;
-      for (let i = 0; i < accountsList.length; i++) {
-        const acc = accountsList[i];
-        addLog(`[账户同步 ${i + 1}/${accountsList.length}] 正在同步账户 [${acc.accountName}] 的历史交易记录...`, 'INFO');
-        
-        const success = await syncSingleAccount(acc.accountName, acc.apiKey, acc.apiSecret, true);
-        if (success) {
-          successCount++;
-        }
-
-        // If there's another account, wait for safety rate limit delay to prevent Binance IP ban/weight limit
-        if (i < accountsList.length - 1) {
-          const delayTime = Math.max(1500, rateLimitDelay * 3);
-          addLog(`[防限速避让] 等待 ${delayTime}ms 后继续同步下一个账户...`, 'INFO');
-          await new Promise(resolve => setTimeout(resolve, delayTime));
-        }
-      }
-
-      addLog(`🎉 全部账户同步任务结束！成功同步: ${successCount} / ${accountsList.length} 个账户。正在刷新全局对账报表...`, 'SUCCESS');
-
-      // Finally, reload all position history to show in the UI
-      const requestedStartTime = new Date(dateRange.start + 'T00:00:00').getTime();
-      const requestedEndTime = new Date(dateRange.end + 'T23:59:59.999').getTime();
+      // Reload the updated history from local DB for ALL accounts, filtered to the user selected range
       const updatedLocalRes = await fetch('/api/position-history');
       if (updatedLocalRes.ok) {
         const fullHistoryList: PositionHistory[] = await updatedLocalRes.json();
         const filteredList = fullHistoryList.filter(h => h.openTime >= requestedStartTime && h.closeTime <= requestedEndTime);
         setPositionHistory(filteredList);
+        // Set selectedReportAccount to 'ALL_ACCOUNTS' to prevent single account triggers that overwrite the state
         setSelectedReportAccount('ALL_ACCOUNTS');
+        addLog(`同步补全完成！当前时间段 [${dateRange.start} 至 ${dateRange.end}] 共计 ${filteredList.filter(h => h.account === activeAccount).length} 条 [${activeAccount}] 的独立闭合仓位记录已成功加载展示，其他账户记录已保留。`, 'SUCCESS');
       }
 
-      // Refresh accounts list
+      // Fetch the available accounts list as well so the dropdown stays in sync
       fetchAvailableAccounts();
 
-    } catch (err: any) {
-      console.error(err);
-      addLog(`全部同步过程中发生异常: ${err.message || err}`, 'ERROR');
+    } catch (error) {
+      console.error(error);
+      addLog('获取历史记录并进行闭环汇总时发生异常', 'ERROR');
     } finally {
       setIsFetchingHistory(false);
     }
@@ -3548,15 +3474,6 @@ export default function App() {
                       <option value={800} className="bg-[#1C1C1E] text-zinc-300">防卡安防 (800ms)</option>
                     </select>
                   </div>
-
-                  <button 
-                    onClick={syncAllAccountsHistory}
-                    disabled={isFetchingHistory}
-                    className="flex items-center gap-2 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded transition-colors disabled:opacity-50"
-                  >
-                    {isFetchingHistory ? <RefreshCw size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                    全部同步
-                  </button>
                 </div>
               </div>
 
