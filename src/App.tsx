@@ -2514,9 +2514,13 @@ export default function App() {
 
       if (missingRanges.length === 0) {
         addLog(`💡 优先本地检索：所选账号 [${activeAccount}] 请求时间段的数据已完全包含在本地数据库中！本次直接极速展示本地存储对账记录，已大幅节省币安接口调用。`, 'SUCCESS');
-        // Filter local history to the requested date range and set state
-        const filteredLocal = localHistory.filter(h => h.openTime >= requestedStartTime && h.closeTime <= requestedEndTime);
-        setPositionHistory(filteredLocal);
+        // Load the updated history from local DB for ALL accounts, filtered to the user selected range, so other accounts are not lost from UI
+        const allRes = await fetch('/api/position-history');
+        if (allRes.ok) {
+          const allHistoryList: PositionHistory[] = await allRes.json();
+          const filteredList = allHistoryList.filter(h => h.openTime >= requestedStartTime && h.closeTime <= requestedEndTime);
+          setPositionHistory(filteredList);
+        }
         setIsFetchingHistory(false);
         return;
       }
@@ -2921,15 +2925,15 @@ export default function App() {
         addLog('未在缺失区段发现任何需要补全的平仓成交记录。', 'INFO');
       }
 
-      // Reload the updated history from local DB for this account, filtered to the user selected range
-      const updatedLocalRes = await fetch(`/api/position-history?account=${encodeURIComponent(activeAccount)}`);
+      // Reload the updated history from local DB for ALL accounts, filtered to the user selected range
+      const updatedLocalRes = await fetch('/api/position-history');
       if (updatedLocalRes.ok) {
         const fullHistoryList: PositionHistory[] = await updatedLocalRes.json();
         const filteredList = fullHistoryList.filter(h => h.openTime >= requestedStartTime && h.closeTime <= requestedEndTime);
         setPositionHistory(filteredList);
-        // Sync report selector to view this account
-        setSelectedReportAccount(activeAccount);
-        addLog(`同步补全完成！当前时间段 [${dateRange.start} 至 ${dateRange.end}] 共计 ${filteredList.length} 条独立闭合仓位记录已成功加载展示。`, 'SUCCESS');
+        // Set selectedReportAccount to 'ALL_ACCOUNTS' to prevent single account triggers that overwrite the state
+        setSelectedReportAccount('ALL_ACCOUNTS');
+        addLog(`同步补全完成！当前时间段 [${dateRange.start} 至 ${dateRange.end}] 共计 ${filteredList.filter(h => h.account === activeAccount).length} 条 [${activeAccount}] 的独立闭合仓位记录已成功加载展示，其他账户记录已保留。`, 'SUCCESS');
       }
 
       // Fetch the available accounts list as well so the dropdown stays in sync
