@@ -32,7 +32,8 @@ import {
   Plus,
   Bell,
   Trash2,
-  Users
+  Users,
+  Mail
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ApiConfig, OrderForm, Position, TradeLog, AccountBalance, OpenOrder, PositionHistory } from './types';
@@ -499,6 +500,28 @@ export default function App() {
   const [showServerIp, setShowServerIp] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isSendingEmail, setIsSendingEmail] = useState<boolean>(false);
+
+  const handleSendEmailReport = async () => {
+    if (isSendingEmail) return;
+    setIsSendingEmail(true);
+    addLog('正在生成全账户资产报表并发送邮件 [猛虎之翼] 至 yyb_cq@outlook.com...', 'INFO');
+    try {
+      const res = await fetch('/api/send-report-email', {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        addLog('邮件 [猛虎之翼] 已成功发送至 yyb_cq@outlook.com！', 'SUCCESS');
+      } else {
+        addLog(`邮件发送失败: ${data.error || '服务器响应异常'}`, 'ERROR');
+      }
+    } catch (err: any) {
+      addLog(`发送邮件过程发生异常: ${err.message || err}`, 'ERROR');
+    } finally {
+      setIsSendingEmail(false);
+    }
+  };
   
   const [positionMode, setPositionMode] = useState<'ONE_WAY' | 'HEDGE'>('ONE_WAY');
   const [isApiVisible, setIsApiVisible] = useState(false);
@@ -3006,19 +3029,21 @@ export default function App() {
   };
 
   const handleForceSync = async () => {
+    if (isForceSyncing) return;
     setIsForceSyncing(true);
-    addLog('正在向服务器发起本日数据强制对账同步...', 'INFO');
+    addLog('正在向服务器发起本日全账户单轮强制对账同步...', 'INFO');
     try {
       const res = await fetch('/api/position-history/force-sync', {
         method: 'POST'
       });
       if (res.ok) {
-        addLog('强制同步成功！本日全部账户闭合仓位数据已自动拉取匹配并保存入库。', 'SUCCESS');
+        addLog('强制同步成功！本日全部账户订单已成功轮询一轮并写入数据库，查询已停止。', 'SUCCESS');
         await loadPositionHistory();
         await fetchAvailableAccounts();
+        await fetchAllAccountsBalance();
       } else {
         const errData = await res.json().catch(() => ({}));
-        addLog(`强制同步失败: ${errData.error || '服务器对账异常'}`, 'ERROR');
+        addLog(`强制同步提示: ${errData.error || '服务器对账异常'}`, 'ERROR');
       }
     } catch (err: any) {
       addLog(`强制同步失败: ${err.message || err}`, 'ERROR');
@@ -4401,12 +4426,34 @@ export default function App() {
               <div className="flex items-center gap-3">
                 <button 
                   type="button"
+                  onClick={handleForceSync}
+                  disabled={isForceSyncing}
+                  className="flex items-center gap-2 px-3 py-2 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white text-xs font-semibold rounded-lg transition-all disabled:opacity-50 select-none cursor-pointer"
+                  title="按账户顺序自动同步本日历史订单(单轮)"
+                >
+                  <RefreshCw size={13} className={isForceSyncing ? "animate-spin" : ""} />
+                  <span>{isForceSyncing ? '强制同步中...' : '强制同步'}</span>
+                </button>
+
+                <button 
+                  type="button"
                   onClick={fetchAllAccountsBalance}
                   disabled={isFetchingAllBalances}
                   className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-xs font-semibold rounded-lg transition-all disabled:opacity-50 select-none cursor-pointer"
                 >
                   <RefreshCw size={13} className={isFetchingAllBalances ? "animate-spin" : ""} />
                   <span>手动刷新数据</span>
+                </button>
+
+                <button 
+                  type="button"
+                  onClick={handleSendEmailReport}
+                  disabled={isSendingEmail}
+                  className="flex items-center gap-2 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white text-xs font-semibold rounded-lg transition-all disabled:opacity-50 select-none cursor-pointer"
+                  title="生成并发送全账户报表邮件 [猛虎之翼]"
+                >
+                  <Mail size={13} className={isSendingEmail ? "animate-bounce" : ""} />
+                  <span>{isSendingEmail ? '发送中...' : '发送邮件'}</span>
                 </button>
               </div>
             </div>
@@ -4598,15 +4645,39 @@ export default function App() {
                 <Users size={18} className="text-[#039be5]" />
                 <h2 className="font-semibold text-zinc-200">全账户信息</h2>
               </div>
-              <button 
-                type="button"
-                onClick={fetchAllAccountsBalance}
-                disabled={isFetchingAllBalances}
-                className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white text-[11px] font-medium rounded transition-all disabled:opacity-50 select-none cursor-pointer"
-              >
-                <RefreshCw size={11} className={isFetchingAllBalances ? "animate-spin text-zinc-300" : "text-zinc-300"} />
-                <span>刷新</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button 
+                  type="button"
+                  onClick={handleForceSync}
+                  disabled={isForceSyncing}
+                  className="flex items-center gap-1.5 px-2 py-1 bg-amber-600 hover:bg-amber-700 active:scale-95 text-white text-[11px] font-medium rounded transition-all disabled:opacity-50 select-none cursor-pointer"
+                  title="单轮强制同步历史仓位对账"
+                >
+                  <RefreshCw size={11} className={isForceSyncing ? "animate-spin" : ""} />
+                  <span>{isForceSyncing ? "同步中" : "强制同步"}</span>
+                </button>
+
+                <button 
+                  type="button"
+                  onClick={fetchAllAccountsBalance}
+                  disabled={isFetchingAllBalances}
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white text-[11px] font-medium rounded transition-all disabled:opacity-50 select-none cursor-pointer"
+                >
+                  <RefreshCw size={11} className={isFetchingAllBalances ? "animate-spin text-zinc-300" : "text-zinc-300"} />
+                  <span>刷新</span>
+                </button>
+
+                <button 
+                  type="button"
+                  onClick={handleSendEmailReport}
+                  disabled={isSendingEmail}
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-700 hover:bg-emerald-600 active:scale-95 text-white text-[11px] font-medium rounded transition-all disabled:opacity-50 select-none cursor-pointer"
+                  title="发送全账户报表邮件 [猛虎之翼]"
+                >
+                  <Mail size={11} className={isSendingEmail ? "animate-bounce" : ""} />
+                  <span>{isSendingEmail ? '发送中' : '发送邮件'}</span>
+                </button>
+              </div>
             </div>
 
             {allAccountsBalances.length === 0 ? (

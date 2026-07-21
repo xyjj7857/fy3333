@@ -4,6 +4,7 @@ import path from "path";
 import os from "os";
 import CryptoJS from "crypto-js";
 import Database from "better-sqlite3";
+import nodemailer from "nodemailer";
 
 // Initialize SQLite database
 const dbPath = process.env.DATABASE_PATH || "trading.db";
@@ -693,19 +694,28 @@ async function binanceSignedRequestWithRetry(
   }
 }
 
-async function syncAccountsForRange(targetStart: number, targetEnd: number, label: string) {
-  const startTimeStr = new Date(targetStart).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  const endTimeStr = new Date(targetEnd).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  addMonitorLog(`[${label}] 正在开始拉取各账户数据：从 ${startTimeStr} 到 ${endTimeStr}`, "INFO");
+let isPositionHistorySyncing = false;
 
-  // Fetch all accounts
-  const accounts = db.prepare("SELECT * FROM api_credentials ORDER BY account_name ASC").all() as any[];
-  if (accounts.length === 0) {
-    addMonitorLog(`[${label}] 未检测到任何已配置的 API 账户，跳过本次同步。`, "INFO");
-    return;
+async function syncAccountsForRange(targetStart: number, targetEnd: number, label: string) {
+  if (isPositionHistorySyncing) {
+    addMonitorLog(`[${label}] 已有同步任务正在后台运行中，请勿重复触发。`, "INFO");
+    return { busy: true };
   }
 
-  addMonitorLog(`[${label}] 检测到 ${accounts.length} 个账户。将按照「逐一同步」顺序，执行链式数据拉取与对账。`, "INFO");
+  isPositionHistorySyncing = true;
+  try {
+    const startTimeStr = new Date(targetStart).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    const endTimeStr = new Date(targetEnd).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+    addMonitorLog(`[${label}] 正在开始拉取各账户数据：从 ${startTimeStr} 到 ${endTimeStr}`, "INFO");
+
+    // Fetch all accounts
+    const accounts = db.prepare("SELECT * FROM api_credentials ORDER BY account_name ASC").all() as any[];
+    if (accounts.length === 0) {
+      addMonitorLog(`[${label}] 未检测到任何已配置的 API 账户，跳过本次同步。`, "INFO");
+      return { busy: false, count: 0 };
+    }
+
+    addMonitorLog(`[${label}] 检测到 ${accounts.length} 个账户。将按照「逐一同步」顺序执行单轮查询，完成后自动停止。`, "INFO");
 
   for (let i = 0; i < accounts.length; i++) {
     const acc = accounts[i];
@@ -1059,7 +1069,276 @@ async function syncAccountsForRange(targetStart: number, targetEnd: number, labe
     }
   }
 
-  addMonitorLog(`[${label}] 同步任务全部圆满完成！`, "SUCCESS");
+    addMonitorLog(`[${label}] 全账户单轮同步全部圆满完成，流程停止。`, "SUCCESS");
+    return { busy: false, count: accounts.length };
+  } finally {
+    isPositionHistorySyncing = false;
+  }
+}
+
+async function fetchAllAccountsBalanceInternal() {
+  const rows = db.prepare("SELECT * FROM api_credentials ORDER BY account_name ASC").all() as any[];
+  if (rows.length === 0) {
+    return {
+      accounts: [],
+      grandTotalSpot: 0,
+      grandTotalFutures: 0,
+      grandTotal: 0,
+      grandTotalHistPnL: 0,
+      grandTotalHistCommission: 0,
+      grandTotalHistFundingFee: 0
+    };
+  }
+
+  const results = await Promise.all(rows.map(async (r) => {
+    const accountName = r.account_name;
+    const apiKey = r.api_key ? decrypt(r.api_key) : "";
+    const apiSecret = r.api_secret ? decrypt(r.api_secret) : "";
+    const baseUrl = r.base_url || "https://fapi-gcp.binance.com";
+
+    // Query historical statistics from local position_history table
+    const stats = db.prepare(`
+      SELECT 
+        SUM(pnl) as totalPnl, 
+        SUM(commission) as totalCommission, 
+        SUM(fundingFee) as totalFundingFee 
+      FROM position_history 
+      WHERE account = ?
+    `).get(accountName) as any;
+
+    const histPnL = stats?.totalPnl || 0;
+    const histCommission = stats?.totalCommission || 0;
+    const histFundingFee = stats?.totalFundingFee || 0;
+
+    if (!apiKey || !apiSecret) {
+      return {
+        accountName,
+        spotBalance: 0,
+        futuresBalance: 0,
+        totalBalance: 0,
+        histPnL,
+        histCommission,
+        histFundingFee,
+        status: "error",
+        error: "缺少 API Key 或 Secret Key"
+      };
+    }
+
+    let spotBalance = 0;
+    let futuresBalance = 0;
+    let spotError = null;
+    let futuresError = null;
+
+    // Fetch Spot
+    try {
+      const spotData = await binanceSignedRequest('/api/v3/account', {}, apiKey, apiSecret, "https://api.binance.com");
+      if (spotData && Array.isArray(spotData.balances)) {
+        const usdtSpot = spotData.balances.find((b: any) => b.asset === 'USDT');
+        if (usdtSpot) {
+          spotBalance = parseFloat(usdtSpot.free) + parseFloat(usdtSpot.locked);
+        }
+      }
+    } catch (err: any) {
+      spotError = err.message || err;
+    }
+
+    // Fetch Futures
+    try {
+      const futuresData = await binanceSignedRequest('/fapi/v2/balance', {}, apiKey, apiSecret, baseUrl);
+      if (Array.isArray(futuresData)) {
+        const usdtFutures = futuresData.find((b: any) => b.asset === 'USDT');
+        if (usdtFutures) {
+          futuresBalance = parseFloat(usdtFutures.balance);
+        }
+      }
+    } catch (err: any) {
+      futuresError = err.message || err;
+    }
+
+    const totalBalance = spotBalance + futuresBalance;
+    const isError = spotError && futuresError;
+    
+    return {
+      accountName,
+      spotBalance,
+      futuresBalance,
+      totalBalance,
+      histPnL,
+      histCommission,
+      histFundingFee,
+      status: isError ? "error" : "success",
+      error: isError ? `现货和合约均获取失败: ${spotError} | ${futuresError}` : (spotError ? `现货获取失败: ${spotError}` : (futuresError ? `合约获取失败: ${futuresError}` : undefined))
+    };
+  }));
+
+  let grandTotalSpot = 0;
+  let grandTotalFutures = 0;
+  let grandTotal = 0;
+  let grandTotalHistPnL = 0;
+  let grandTotalHistCommission = 0;
+  let grandTotalHistFundingFee = 0;
+
+  results.forEach(acc => {
+    grandTotalSpot += acc.spotBalance;
+    grandTotalFutures += acc.futuresBalance;
+    grandTotal += acc.totalBalance;
+    grandTotalHistPnL += acc.histPnL;
+    grandTotalHistCommission += acc.histCommission;
+    grandTotalHistFundingFee += acc.histFundingFee;
+  });
+
+  return {
+    accounts: results,
+    grandTotalSpot,
+    grandTotalFutures,
+    grandTotal,
+    grandTotalHistPnL,
+    grandTotalHistCommission,
+    grandTotalHistFundingFee
+  };
+}
+
+async function sendAccountReportEmail(data: any) {
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.qq.com',
+    port: 465,
+    secure: true,
+    auth: {
+      user: '67552827@qq.com',
+      pass: 'qoaferkcewigbhbh'
+    }
+  });
+
+  const nowStr = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+
+  const fmt = (val: number, decimals = 2) => (typeof val === 'number' && !isNaN(val) ? val.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals }) : '0.00');
+  const fmtPnL = (val: number) => (val >= 0 ? '+' : '') + fmt(val, 2);
+
+  let html = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <title>猛虎之翼</title>
+  </head>
+  <body style="margin:0; padding:20px; background-color:#09090b; color:#e4e4e7; font-family:-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+    <div style="max-width:960px; margin:0 auto; background-color:#121215; border:1px solid #27272a; border-radius:12px; padding:24px;">
+      
+      <!-- Header -->
+      <div style="border-bottom:1px solid #27272a; padding-bottom:16px; margin-bottom:24px;">
+        <h1 style="margin:0; font-size:22px; font-weight:800; color:#ffffff; letter-spacing:-0.5px;">
+          猛虎之翼 <span style="font-size:13px; font-weight:normal; color:#a1a1aa; margin-left:8px;">每日全账户资产与累计历史报表</span>
+        </h1>
+        <div style="font-size:12px; color:#71717a; margin-top:6px;">生成时间: ${nowStr} (CST)</div>
+      </div>
+
+      <!-- Top Summary 6 Cards -->
+      <table style="width:100%; border-collapse:separate; border-spacing:10px; margin-bottom:20px;">
+        <tr>
+          <td style="width:33%; background-color:#18181b; border:1px solid #27272a; border-left:4px solid #6366f1; border-radius:8px; padding:14px; vertical-align:top;">
+            <div style="font-size:12px; color:#a1a1aa; font-weight:500;">总资产合计</div>
+            <div style="font-size:20px; font-weight:bold; color:#818cf8; margin-top:6px; font-family:monospace;">${fmt(data.grandTotal)}</div>
+            <div style="font-size:10px; color:#71717a; margin-top:4px;">现货 + 合约</div>
+          </td>
+          <td style="width:33%; background-color:#18181b; border:1px solid #27272a; border-left:4px solid #71717a; border-radius:8px; padding:14px; vertical-align:top;">
+            <div style="font-size:12px; color:#a1a1aa; font-weight:500;">现货资产合计</div>
+            <div style="font-size:20px; font-weight:bold; color:#d4d4d8; margin-top:6px; font-family:monospace;">${fmt(data.grandTotalSpot)}</div>
+            <div style="font-size:10px; color:#71717a; margin-top:4px;">Binance 现货</div>
+          </td>
+          <td style="width:33%; background-color:#18181b; border:1px solid #27272a; border-left:4px solid #3b82f6; border-radius:8px; padding:14px; vertical-align:top;">
+            <div style="font-size:12px; color:#a1a1aa; font-weight:500;">合约资产合计</div>
+            <div style="font-size:20px; font-weight:bold; color:#60a5fa; margin-top:6px; font-family:monospace;">${fmt(data.grandTotalFutures)}</div>
+            <div style="font-size:10px; color:#71717a; margin-top:4px;">U本位合约保证金</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="width:33%; background-color:#18181b; border:1px solid #27272a; border-left:4px solid #10b981; border-radius:8px; padding:14px; vertical-align:top;">
+            <div style="font-size:12px; color:#a1a1aa; font-weight:500;">历史累计总盈亏</div>
+            <div style="font-size:20px; font-weight:bold; color:${data.grandTotalHistPnL >= 0 ? '#10b981' : '#ef4444'}; margin-top:6px; font-family:monospace;">${fmtPnL(data.grandTotalHistPnL)}</div>
+            <div style="font-size:10px; color:#71717a; margin-top:4px;">基于本地已平仓仓单</div>
+          </td>
+          <td style="width:33%; background-color:#18181b; border:1px solid #27272a; border-left:4px solid #f59e0b; border-radius:8px; padding:14px; vertical-align:top;">
+            <div style="font-size:12px; color:#a1a1aa; font-weight:500;">历史累计总手续费</div>
+            <div style="font-size:20px; font-weight:bold; color:#f59e0b; margin-top:6px; font-family:monospace;">${fmt(data.grandTotalHistCommission)}</div>
+            <div style="font-size:10px; color:#71717a; margin-top:4px;">平仓单手续费</div>
+          </td>
+          <td style="width:33%; background-color:#18181b; border:1px solid #27272a; border-left:4px solid #ef4444; border-radius:8px; padding:14px; vertical-align:top;">
+            <div style="font-size:12px; color:#a1a1aa; font-weight:500;">历史累计总资金费率</div>
+            <div style="font-size:20px; font-weight:bold; color:${data.grandTotalHistFundingFee >= 0 ? '#f87171' : '#34d399'}; margin-top:6px; font-family:monospace;">${fmt(data.grandTotalHistFundingFee)}</div>
+            <div style="font-size:10px; color:#71717a; margin-top:4px;">正值支出 / 负值收入</div>
+          </td>
+        </tr>
+      </table>
+
+      <!-- Table Container -->
+      <div style="background-color:#18181b; border:1px solid #27272a; border-radius:8px; overflow:hidden;">
+        <div style="padding:16px; border-bottom:1px solid #27272a; font-weight:bold; font-size:15px; color:#f4f4f5;">
+          管理账户资产与累计历史报表
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:12px; font-family:Consolas, Monaco, monospace; text-align:right;">
+          <thead>
+            <tr style="background-color:#27272a; color:#a1a1aa; font-size:11px; text-transform:uppercase;">
+              <th style="padding:10px 12px; text-align:left;">管理账户名称</th>
+              <th style="padding:10px 12px;">现货余额</th>
+              <th style="padding:10px 12px;">合约余额</th>
+              <th style="padding:10px 12px;">总资产合计</th>
+              <th style="padding:10px 12px;">历史累计盈亏</th>
+              <th style="padding:10px 12px;">历史累计手续费</th>
+              <th style="padding:10px 12px;">历史累计资金费率</th>
+              <th style="padding:10px 12px; text-align:center;">API 连接状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${data.accounts.map((acc: any) => `
+              <tr style="border-bottom:1px solid #27272a;">
+                <td style="padding:10px 12px; text-align:left; font-weight:bold; color:#f4f4f5;">${acc.accountName}</td>
+                <td style="padding:10px 12px; color:#d4d4d8;">${acc.status === 'error' ? '异常' : fmt(acc.spotBalance)}</td>
+                <td style="padding:10px 12px; color:#d4d4d8;">${acc.status === 'error' ? '异常' : fmt(acc.futuresBalance)}</td>
+                <td style="padding:10px 12px; font-weight:bold; color:#818cf8;">${acc.status === 'error' ? '异常' : fmt(acc.totalBalance)}</td>
+                <td style="padding:10px 12px; font-weight:bold; color:${acc.histPnL >= 0 ? '#10b981' : '#ef4444'};">${fmtPnL(acc.histPnL)}</td>
+                <td style="padding:10px 12px; color:#f59e0b;">${fmt(acc.histCommission)}</td>
+                <td style="padding:10px 12px; color:${acc.histFundingFee >= 0 ? '#f87171' : '#34d399'};">${fmt(acc.histFundingFee)}</td>
+                <td style="padding:10px 12px; text-align:center;">
+                  ${acc.status === 'error' 
+                    ? '<span style="color:#ef4444; background:rgba(239,68,68,0.1); border:1px solid rgba(239,68,68,0.3); padding:2px 6px; border-radius:4px; font-size:10px;">配置异常</span>'
+                    : '<span style="color:#10b981; background:rgba(16,185,129,0.1); border:1px solid rgba(16,185,129,0.3); padding:2px 6px; border-radius:4px; font-size:10px;">连接成功</span>'}
+                </td>
+              </tr>
+            `).join('')}
+          </tbody>
+          <tfoot>
+            <tr style="background-color:#27272a; font-weight:bold; color:#ffffff; border-top:2px solid #3f3f46;">
+              <td style="padding:12px; text-align:left;">合并总计</td>
+              <td style="padding:12px; color:#d4d4d8;">${fmt(data.grandTotalSpot)}</td>
+              <td style="padding:12px; color:#d4d4d8;">${fmt(data.grandTotalFutures)}</td>
+              <td style="padding:12px; color:#818cf8;">${fmt(data.grandTotal)}</td>
+              <td style="padding:12px; color:${data.grandTotalHistPnL >= 0 ? '#10b981' : '#ef4444'};">${fmtPnL(data.grandTotalHistPnL)}</td>
+              <td style="padding:12px; color:#f59e0b;">${fmt(data.grandTotalHistCommission)}</td>
+              <td style="padding:12px; color:${data.grandTotalHistFundingFee >= 0 ? '#f87171' : '#34d399'};">${fmt(data.grandTotalHistFundingFee)}</td>
+              <td style="padding:12px; text-align:center; color:#71717a;">--</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
+    </div>
+  </body>
+  </html>
+  `;
+
+  // ABSOLUTE RULE: CLEAR ALL OCCURRENCES OF "USDT"
+  html = html.replace(/USDT/gi, '');
+  const subject = "猛虎之翼".replace(/USDT/gi, '');
+
+  const mailOptions = {
+    from: '"猛虎之翼" <67552827@qq.com>',
+    to: 'yyb_cq@outlook.com',
+    subject: subject,
+    html: html
+  };
+
+  const info = await transporter.sendMail(mailOptions);
+  return { success: true, messageId: info.messageId };
 }
 
 async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow: Date) {
@@ -1089,6 +1368,24 @@ async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow
   }
 
   await syncAccountsForRange(targetPrevDayStart, targetPrevDayEnd, "Auto Sync");
+
+  addMonitorLog(`[Auto Sync] 仓位历史记录同步完毕！等待 1 分钟 (60 秒) 后将自动刷新「全账户信息」并发送邮件 [猛虎之翼]...`, "INFO");
+
+  setTimeout(async () => {
+    try {
+      addMonitorLog(`[Auto Sync Mail] 1 分钟等待结束，正在自动刷新获取最新「全账户信息」...`, "INFO");
+      const accountData = await fetchAllAccountsBalanceInternal();
+      
+      addMonitorLog(`[Auto Sync Mail] 已获取最新全账户数据，正在发送邮件 [猛虎之翼] 至 yyb_cq@outlook.com...`, "INFO");
+      const mailRes = await sendAccountReportEmail(accountData);
+      if (mailRes && mailRes.success) {
+        addMonitorLog(`[Auto Sync Mail] 邮件 [猛虎之翼] 成功发送给 yyb_cq@outlook.com！`, "SUCCESS");
+      }
+    } catch (err: any) {
+      console.error("[Auto Sync Mail Error]", err);
+      addMonitorLog(`[Auto Sync Mail Error] 自动刷新并发送邮件过程出错: ${err.message || err}`, "ERROR");
+    }
+  }, 60000);
 }
 
 function initDailyAutoSync() {
@@ -1332,128 +1629,26 @@ async function startServer() {
   // Fetch Spot and Futures balance for all managed accounts
   app.get("/api/all-accounts-balance", async (req, res) => {
     try {
-      const rows = db.prepare("SELECT * FROM api_credentials ORDER BY account_name ASC").all() as any[];
-      if (rows.length === 0) {
-        return res.json({
-          accounts: [],
-          grandTotalSpot: 0,
-          grandTotalFutures: 0,
-          grandTotal: 0,
-          grandTotalHistPnL: 0,
-          grandTotalHistCommission: 0,
-          grandTotalHistFundingFee: 0
-        });
-      }
-
-      const results = await Promise.all(rows.map(async (r) => {
-        const accountName = r.account_name;
-        const apiKey = r.api_key ? decrypt(r.api_key) : "";
-        const apiSecret = r.api_secret ? decrypt(r.api_secret) : "";
-        const baseUrl = r.base_url || "https://fapi-gcp.binance.com";
-
-        // Query historical statistics from local position_history table
-        const stats = db.prepare(`
-          SELECT 
-            SUM(pnl) as totalPnl, 
-            SUM(commission) as totalCommission, 
-            SUM(fundingFee) as totalFundingFee 
-          FROM position_history 
-          WHERE account = ?
-        `).get(accountName) as any;
-
-        const histPnL = stats?.totalPnl || 0;
-        const histCommission = stats?.totalCommission || 0;
-        const histFundingFee = stats?.totalFundingFee || 0;
-
-        if (!apiKey || !apiSecret) {
-          return {
-            accountName,
-            spotBalance: 0,
-            futuresBalance: 0,
-            totalBalance: 0,
-            histPnL,
-            histCommission,
-            histFundingFee,
-            status: "error",
-            error: "缺少 API Key 或 Secret Key"
-          };
-        }
-
-        let spotBalance = 0;
-        let futuresBalance = 0;
-        let spotError = null;
-        let futuresError = null;
-
-        // Fetch Spot
-        try {
-          const spotData = await binanceSignedRequest('/api/v3/account', {}, apiKey, apiSecret, "https://api.binance.com");
-          if (spotData && Array.isArray(spotData.balances)) {
-            const usdtSpot = spotData.balances.find((b: any) => b.asset === 'USDT');
-            if (usdtSpot) {
-              spotBalance = parseFloat(usdtSpot.free) + parseFloat(usdtSpot.locked);
-            }
-          }
-        } catch (err: any) {
-          spotError = err.message || err;
-        }
-
-        // Fetch Futures
-        try {
-          const futuresData = await binanceSignedRequest('/fapi/v2/balance', {}, apiKey, apiSecret, baseUrl);
-          if (Array.isArray(futuresData)) {
-            const usdtFutures = futuresData.find((b: any) => b.asset === 'USDT');
-            if (usdtFutures) {
-              futuresBalance = parseFloat(usdtFutures.balance);
-            }
-          }
-        } catch (err: any) {
-          futuresError = err.message || err;
-        }
-
-        const totalBalance = spotBalance + futuresBalance;
-        const isError = spotError && futuresError;
-        
-        return {
-          accountName,
-          spotBalance,
-          futuresBalance,
-          totalBalance,
-          histPnL,
-          histCommission,
-          histFundingFee,
-          status: isError ? "error" : "success",
-          error: isError ? `现货和合约均获取失败: ${spotError} | ${futuresError}` : (spotError ? `现货获取失败: ${spotError}` : (futuresError ? `合约获取失败: ${futuresError}` : undefined))
-        };
-      }));
-
-      let grandTotalSpot = 0;
-      let grandTotalFutures = 0;
-      let grandTotal = 0;
-      let grandTotalHistPnL = 0;
-      let grandTotalHistCommission = 0;
-      let grandTotalHistFundingFee = 0;
-
-      results.forEach(acc => {
-        grandTotalSpot += acc.spotBalance;
-        grandTotalFutures += acc.futuresBalance;
-        grandTotal += acc.totalBalance;
-        grandTotalHistPnL += acc.histPnL;
-        grandTotalHistCommission += acc.histCommission;
-        grandTotalHistFundingFee += acc.histFundingFee;
-      });
-
-      res.json({
-        accounts: results,
-        grandTotalSpot,
-        grandTotalFutures,
-        grandTotal,
-        grandTotalHistPnL,
-        grandTotalHistCommission,
-        grandTotalHistFundingFee
-      });
+      const data = await fetchAllAccountsBalanceInternal();
+      res.json(data);
     } catch (error: any) {
       console.error("Failed to fetch all accounts balance:", error);
       res.status(500).json({ error: error.message || "Internal Server Error" });
+    }
+  });
+
+  // API to manually trigger email report sending
+  app.post("/api/send-report-email", async (req, res) => {
+    try {
+      addMonitorLog(`[Email Report] 正在获取最新「全账户信息」并发送邮件 [猛虎之翼]...`, "INFO");
+      const data = await fetchAllAccountsBalanceInternal();
+      const result = await sendAccountReportEmail(data);
+      addMonitorLog(`[Email Report] 邮件已成功发送至 yyb_cq@outlook.com！`, "SUCCESS");
+      res.json({ status: "success", message: "邮件发送成功！", result });
+    } catch (error: any) {
+      console.error("Failed to send email report:", error);
+      addMonitorLog(`[Email Report Error] 发送邮件失败: ${error.message || error}`, "ERROR");
+      res.status(500).json({ error: error.message || "邮件发送失败" });
     }
   });
 
@@ -1550,6 +1745,10 @@ async function startServer() {
   // Force sync all accounts for today's history orders
   app.post("/api/position-history/force-sync", async (req, res) => {
     try {
+      if (isPositionHistorySyncing) {
+        return res.status(409).json({ error: "后台已有正在执行的同步任务，请勿重复点击。" });
+      }
+
       const now = new Date();
       const utc8Date = new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60000);
       const cstYear = utc8Date.getFullYear();
@@ -1559,11 +1758,15 @@ async function startServer() {
       const todayStart = Date.UTC(cstYear, cstMonth, cstDate, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
       const todayEnd = Date.UTC(cstYear, cstMonth, cstDate, 23, 59, 59, 999) - 8 * 60 * 60 * 1000;
 
-      addMonitorLog(`[Force Sync] 收到前端强制同步请求，正在按账户顺序自动同步本日的历史订单 [00:00 到 23:59:59]...`, "INFO");
+      addMonitorLog(`[Force Sync] 收到前端强制同步请求，开始按账户顺序进行单轮历史订单同步...`, "INFO");
       
-      await syncAccountsForRange(todayStart, todayEnd, "Force Sync");
+      const syncRes = await syncAccountsForRange(todayStart, todayEnd, "Force Sync");
       
-      res.json({ status: "success", message: "Force sync completed." });
+      if (syncRes && syncRes.busy) {
+        return res.status(409).json({ error: "后台已有正在执行的同步任务。" });
+      }
+
+      res.json({ status: "success", message: "单轮全账户强制同步已完成，已停止查询。" });
     } catch (error: any) {
       console.error("Force sync failed:", error);
       res.status(500).json({ error: error.message });
