@@ -175,6 +175,7 @@ export default function App() {
   const [activeMainTab, setActiveMainTab] = useState<'TRADE' | 'MONITOR' | 'REPORT'>('TRADE');
   const [positionHistory, setPositionHistory] = useState<PositionHistory[]>([]);
   const [isFetchingHistory, setIsFetchingHistory] = useState(false);
+  const [isForceSyncing, setIsForceSyncing] = useState(false);
   
   // Alert Logs States
   const [alertLogs, setAlertLogs] = useState<any[]>([]);
@@ -2947,6 +2948,28 @@ export default function App() {
     }
   };
 
+  const handleForceSync = async () => {
+    setIsForceSyncing(true);
+    addLog('正在向服务器发起本日数据强制对账同步...', 'INFO');
+    try {
+      const res = await fetch('/api/position-history/force-sync', {
+        method: 'POST'
+      });
+      if (res.ok) {
+        addLog('强制同步成功！本日全部账户闭合仓位数据已自动拉取匹配并保存入库。', 'SUCCESS');
+        await loadPositionHistory();
+        await fetchAvailableAccounts();
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        addLog(`强制同步失败: ${errData.error || '服务器对账异常'}`, 'ERROR');
+      }
+    } catch (err: any) {
+      addLog(`强制同步失败: ${err.message || err}`, 'ERROR');
+    } finally {
+      setIsForceSyncing(false);
+    }
+  };
+
   const formatDateChinese = (dateStr: string) => {
     if (!dateStr) return '';
     const [year, month, day] = dateStr.split('-');
@@ -3458,6 +3481,15 @@ export default function App() {
                   >
                     {isFetchingHistory ? <RefreshCw size={14} className="animate-spin" /> : <RefreshCw size={14} />}
                     {isFetchingHistory ? '同步中...' : '同步历史'}
+                  </button>
+
+                  <button 
+                    onClick={handleForceSync}
+                    disabled={isForceSyncing}
+                    className="flex items-center gap-2 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold rounded transition-colors disabled:opacity-50"
+                  >
+                    {isForceSyncing ? <RefreshCw size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                    {isForceSyncing ? '同步中...' : '强制同步'}
                   </button>
 
                   <div className="flex items-center gap-1.5 bg-[#1C1C1E] px-2.5 py-1.5 rounded border border-[#232326]">

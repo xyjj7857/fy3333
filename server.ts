@@ -693,46 +693,24 @@ async function binanceSignedRequestWithRetry(
   }
 }
 
-async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow: Date) {
-  let targetPrevDayStart = 0;
-  let targetPrevDayEnd = 0;
-
-  if (syncTimezone.includes("Local")) {
-    const prevDay = new Date(localNow.getTime() - 24 * 60 * 60 * 1000);
-    prevDay.setHours(0, 0, 0, 0);
-    targetPrevDayStart = prevDay.getTime();
-    
-    const prevDayEnd = new Date(prevDay);
-    prevDayEnd.setHours(23, 59, 59, 999);
-    targetPrevDayEnd = prevDayEnd.getTime();
-  } else {
-    // CST (UTC+8)
-    const prevDayCst = new Date(cstNow.getTime() - 24 * 60 * 60 * 1000);
-    const cstYear = prevDayCst.getFullYear();
-    const cstMonth = prevDayCst.getMonth();
-    const cstDate = prevDayCst.getDate();
-    
-    targetPrevDayStart = Date.UTC(cstYear, cstMonth, cstDate, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
-    targetPrevDayEnd = Date.UTC(cstYear, cstMonth, cstDate, 23, 59, 59, 999) - 8 * 60 * 60 * 1000;
-  }
-
-  const startTimeStr = new Date(targetPrevDayStart).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  const endTimeStr = new Date(targetPrevDayEnd).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
-  addMonitorLog(`[Auto Sync] 正在开始自动拉取各账户上一日数据：从 ${startTimeStr} 到 ${endTimeStr}`, "INFO");
+async function syncAccountsForRange(targetStart: number, targetEnd: number, label: string) {
+  const startTimeStr = new Date(targetStart).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+  const endTimeStr = new Date(targetEnd).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+  addMonitorLog(`[${label}] 正在开始拉取各账户数据：从 ${startTimeStr} 到 ${endTimeStr}`, "INFO");
 
   // Fetch all accounts
   const accounts = db.prepare("SELECT * FROM api_credentials ORDER BY account_name ASC").all() as any[];
   if (accounts.length === 0) {
-    addMonitorLog("[Auto Sync] 未检测到任何已配置的 API 账户，跳过本次自动同步。", "INFO");
+    addMonitorLog(`[${label}] 未检测到任何已配置的 API 账户，跳过本次同步。`, "INFO");
     return;
   }
 
-  addMonitorLog(`[Auto Sync] 检测到 ${accounts.length} 个账户。将按照「逐一同步」顺序，执行链式数据拉取与对账。`, "INFO");
+  addMonitorLog(`[${label}] 检测到 ${accounts.length} 个账户。将按照「逐一同步」顺序，执行链式数据拉取与对账。`, "INFO");
 
   for (let i = 0; i < accounts.length; i++) {
     const acc = accounts[i];
     const accountName = acc.account_name;
-    addMonitorLog(`[Auto Sync] [${i+1}/${accounts.length}] 正在启动账户 [${accountName}] 的对账分析...`, "INFO");
+    addMonitorLog(`[${label}] [${i+1}/${accounts.length}] 正在启动账户 [${accountName}] 的对账分析...`, "INFO");
 
     try {
       const apiKey = acc.api_key ? decrypt(acc.api_key) : "";
@@ -740,7 +718,7 @@ async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow
       const baseUrl = acc.base_url || "https://fapi-gcp.binance.com";
 
       if (!apiKey || !apiSecret) {
-        addMonitorLog(`[Auto Sync] 账户 [${accountName}] 缺少有效的 API 密钥，已自动跳过。`, "ERROR");
+        addMonitorLog(`[${label}] 账户 [${accountName}] 缺少有效的 API 密钥，已自动跳过。`, "ERROR");
         continue;
       }
 
@@ -758,22 +736,22 @@ async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow
             }));
         }
       } catch (err: any) {
-        addMonitorLog(`[Auto Sync] [${accountName}] 获取持仓信息失败: ${err.message || err}。将默认完整对账全部成交。`, "INFO");
+        addMonitorLog(`[${label}] [${accountName}] 获取持仓信息失败: ${err.message || err}。将默认完整对账全部成交。`, "INFO");
       }
 
       // Step 2: Fetch income streams (realized pnl, commissions, funding fee)
       let allIncome: any[] = [];
       try {
         const incomeData = await binanceSignedRequestWithRetry('/fapi/v1/income', {
-          startTime: targetPrevDayStart,
-          endTime: targetPrevDayEnd,
+          startTime: targetStart,
+          endTime: targetEnd,
           limit: 1000
         }, apiKey, apiSecret, baseUrl);
         if (Array.isArray(incomeData)) {
           allIncome = incomeData;
         }
       } catch (err: any) {
-        addMonitorLog(`[Auto Sync] [${accountName}] 抓取收入流水失败: ${err.message || err}。跳过该账户。`, "ERROR");
+        addMonitorLog(`[${label}] [${accountName}] 抓取收入流水失败: ${err.message || err}。跳过该账户。`, "ERROR");
         continue;
       }
 
@@ -787,11 +765,11 @@ async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow
       const activeSymbols = Array.from(activeSymbolsSet);
 
       if (activeSymbols.length === 0) {
-        addMonitorLog(`[Auto Sync] [${accountName}] 在同步时间段内未发生任何交易成交或资金流转。该账户同步完成。`, "SUCCESS");
+        addMonitorLog(`[${label}] [${accountName}] 在同步时间段内未发生任何交易成交或资金流转。该账户同步完成。`, "SUCCESS");
         continue;
       }
 
-      addMonitorLog(`[Auto Sync] [${accountName}] 检测到上一日共有 ${activeSymbols.length} 个合约发生过变动或存在持仓，开始精准抓取成交记录...`, "INFO");
+      addMonitorLog(`[${label}] [${accountName}] 检测到共有 ${activeSymbols.length} 个合约发生过变动或存在持仓，开始精准抓取成交记录...`, "INFO");
 
       // Step 3: Fetch trades for active symbols
       let allTrades: any[] = [];
@@ -799,21 +777,21 @@ async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow
         try {
           const trades = await binanceSignedRequestWithRetry('/fapi/v1/userTrades', {
             symbol,
-            startTime: targetPrevDayStart,
-            endTime: targetPrevDayEnd,
+            startTime: targetStart,
+            endTime: targetEnd,
             limit: 1000
           }, apiKey, apiSecret, baseUrl);
           if (Array.isArray(trades)) {
             allTrades = [...allTrades, ...trades];
           }
         } catch (err: any) {
-          addMonitorLog(`[Auto Sync] [${accountName}] 获取合约 [${symbol}] 的成交历史失败: ${err.message || err}`, "ERROR");
+          addMonitorLog(`[${label}] [${accountName}] 获取合约 [${symbol}] 的成交历史失败: ${err.message || err}`, "ERROR");
         }
         await new Promise(resolve => setTimeout(resolve, 300));
       }
 
       if (allTrades.length === 0) {
-        addMonitorLog(`[Auto Sync] [${accountName}] 未检索到上一日任何底层的交易成交数据。`, "INFO");
+        addMonitorLog(`[${label}] [${accountName}] 未检索到任何底层的交易成交数据。`, "INFO");
         continue;
       }
 
@@ -1064,24 +1042,53 @@ async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow
         });
 
         tx(segmentMergedHistory);
-        addMonitorLog(`[Auto Sync] 账户 [${accountName}] 对账分析成功！同步生成并持久化了 ${segmentMergedHistory.length} 条全新历史闭环仓位。`, "SUCCESS");
+        addMonitorLog(`[${label}] 账户 [${accountName}] 对账分析成功！同步生成并持久化了 ${segmentMergedHistory.length} 条全新历史闭环仓位。`, "SUCCESS");
       } else {
-        addMonitorLog(`[Auto Sync] 账户 [${accountName}] 在上一日没有可生成的闭环交易历史。`, "INFO");
+        addMonitorLog(`[${label}] 账户 [${accountName}] 在该时间段没有可生成的闭环交易历史。`, "INFO");
       }
 
     } catch (err: any) {
-      console.error(`[Auto Sync] [${accountName}] Sync Process Failed:`, err);
-      addMonitorLog(`[Auto Sync] 账户 [${accountName}] 数据抓取/平仓匹配失败: ${err.message || err}`, "ERROR");
+      console.error(`[${label}] [${accountName}] Sync Process Failed:`, err);
+      addMonitorLog(`[${label}] 账户 [${accountName}] 数据抓取/平仓匹配失败: ${err.message || err}`, "ERROR");
     }
 
     // Rate-limiting delay before the next account to protect Binance weights
     if (i < accounts.length - 1) {
-      addMonitorLog(`[Auto Sync] 防限速避让：等待 3 秒后继续同步下一个账户...`, "INFO");
+      addMonitorLog(`[${label}] 防限速避让：等待 3 秒后继续同步下一个账户...`, "INFO");
       await new Promise(resolve => setTimeout(resolve, 3000));
     }
   }
 
-  addMonitorLog(`[Auto Sync] 每日自动定时同步任务全部圆满完成！`, "SUCCESS");
+  addMonitorLog(`[${label}] 同步任务全部圆满完成！`, "SUCCESS");
+}
+
+async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow: Date) {
+  let targetPrevDayStart = 0;
+  let targetPrevDayEnd = 0;
+
+  if (syncTimezone.includes("Local")) {
+    const prevDay = new Date(localNow.getTime() - 24 * 60 * 60 * 1000);
+    prevDay.setHours(0, 0, 0, 0);
+    targetPrevDayStart = prevDay.getTime();
+    
+    const today = new Date(localNow);
+    today.setHours(8, 0, 0, 0);
+    targetPrevDayEnd = today.getTime();
+  } else {
+    // CST (UTC+8)
+    const prevDayCst = new Date(cstNow.getTime() - 24 * 60 * 60 * 1000);
+    const prevCstYear = prevDayCst.getFullYear();
+    const prevCstMonth = prevDayCst.getMonth();
+    const prevCstDate = prevDayCst.getDate();
+    targetPrevDayStart = Date.UTC(prevCstYear, prevCstMonth, prevCstDate, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
+
+    const todayCstYear = cstNow.getFullYear();
+    const todayCstMonth = cstNow.getMonth();
+    const todayCstDate = cstNow.getDate();
+    targetPrevDayEnd = Date.UTC(todayCstYear, todayCstMonth, todayCstDate, 8, 0, 0, 0) - 8 * 60 * 60 * 1000;
+  }
+
+  await syncAccountsForRange(targetPrevDayStart, targetPrevDayEnd, "Auto Sync");
 }
 
 function initDailyAutoSync() {
@@ -1100,14 +1107,14 @@ function initDailyAutoSync() {
     let syncBaseDateStr = "";
     let syncTimezone = "";
 
-    if (localHour === 6 && localMinute === 18) {
+    if (localHour === 8 && localMinute === 18) {
       const yyyy = now.getFullYear();
       const mm = String(now.getMonth() + 1).padStart(2, '0');
       const dd = String(now.getDate()).padStart(2, '0');
       syncBaseDateStr = `${yyyy}-${mm}-${dd}_local`;
       triggerSync = true;
       syncTimezone = "Local Server Time";
-    } else if (cstHour === 6 && cstMinute === 18) {
+    } else if (cstHour === 8 && cstMinute === 18) {
       const yyyy = utc8Date.getFullYear();
       const mm = String(utc8Date.getMonth() + 1).padStart(2, '0');
       const dd = String(utc8Date.getDate()).padStart(2, '0');
@@ -1408,6 +1415,29 @@ async function startServer() {
       res.json(accounts);
     } catch (error: any) {
       console.error("Failed to fetch accounts from DB:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Force sync all accounts for today's history orders
+  app.post("/api/position-history/force-sync", async (req, res) => {
+    try {
+      const now = new Date();
+      const utc8Date = new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60000);
+      const cstYear = utc8Date.getFullYear();
+      const cstMonth = utc8Date.getMonth();
+      const cstDate = utc8Date.getDate();
+      
+      const todayStart = Date.UTC(cstYear, cstMonth, cstDate, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
+      const todayEnd = Date.UTC(cstYear, cstMonth, cstDate, 23, 59, 59, 999) - 8 * 60 * 60 * 1000;
+
+      addMonitorLog(`[Force Sync] 收到前端强制同步请求，正在按账户顺序自动同步本日的历史订单 [00:00 到 23:59:59]...`, "INFO");
+      
+      await syncAccountsForRange(todayStart, todayEnd, "Force Sync");
+      
+      res.json({ status: "success", message: "Force sync completed." });
+    } catch (error: any) {
+      console.error("Force sync failed:", error);
       res.status(500).json({ error: error.message });
     }
   });
