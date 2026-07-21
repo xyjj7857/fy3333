@@ -31,7 +31,8 @@ import {
   VolumeX,
   Plus,
   Bell,
-  Trash2
+  Trash2,
+  Users
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ApiConfig, OrderForm, Position, TradeLog, AccountBalance, OpenOrder, PositionHistory } from './types';
@@ -172,10 +173,33 @@ export default function App() {
   };
 
   // State
-  const [activeMainTab, setActiveMainTab] = useState<'TRADE' | 'MONITOR' | 'REPORT'>('TRADE');
+  const [activeMainTab, setActiveMainTab] = useState<'ACCOUNTS' | 'TRADE' | 'MONITOR' | 'REPORT'>('ACCOUNTS');
   const [positionHistory, setPositionHistory] = useState<PositionHistory[]>([]);
   const [isFetchingHistory, setIsFetchingHistory] = useState(false);
   const [isForceSyncing, setIsForceSyncing] = useState(false);
+
+  // All Accounts Balance State
+  interface AccountBalanceItem {
+    accountName: string;
+    spotBalance: number;
+    futuresBalance: number;
+    totalBalance: number;
+    histPnL: number;
+    histCommission: number;
+    histFundingFee: number;
+    status: 'success' | 'error';
+    error?: string;
+  }
+  const [allAccountsBalances, setAllAccountsBalances] = useState<AccountBalanceItem[]>([]);
+  const [isFetchingAllBalances, setIsFetchingAllBalances] = useState<boolean>(false);
+  const [allAccountsGrandTotal, setAllAccountsGrandTotal] = useState({
+    spot: 0,
+    futures: 0,
+    total: 0,
+    histPnL: 0,
+    histCommission: 0,
+    histFundingFee: 0
+  });
   
   // Alert Logs States
   const [alertLogs, setAlertLogs] = useState<any[]>([]);
@@ -935,6 +959,34 @@ export default function App() {
     }
   }, [addLog]);
 
+  const fetchAllAccountsBalance = useCallback(async () => {
+    setIsFetchingAllBalances(true);
+    addLog('正在获取所有管理账户的现货和合约余额...', 'INFO');
+    try {
+      const res = await fetch('/api/all-accounts-balance');
+      if (res.ok) {
+        const data = await res.json();
+        setAllAccountsBalances(data.accounts || []);
+        setAllAccountsGrandTotal({
+          spot: data.grandTotalSpot || 0,
+          futures: data.grandTotalFutures || 0,
+          total: data.grandTotal || 0,
+          histPnL: data.grandTotalHistPnL || 0,
+          histCommission: data.grandTotalHistCommission || 0,
+          histFundingFee: data.grandTotalHistFundingFee || 0
+        });
+        addLog('所有管理账户余额数据更新成功！', 'SUCCESS');
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        addLog(`获取全账户信息失败: ${errData.error || '服务器查询异常'}`, 'ERROR');
+      }
+    } catch (err: any) {
+      addLog(`获取全账户信息出错: ${err.message || err}`, 'ERROR');
+    } finally {
+      setIsFetchingAllBalances(false);
+    }
+  }, [addLog]);
+
   const loadPositionHistory = useCallback(async (accountStr?: string) => {
     try {
       const act = accountStr !== undefined ? accountStr : selectedReportAccount;
@@ -1156,6 +1208,11 @@ export default function App() {
       active = false;
     };
   }, [addLog, fetchAvailableAccounts, fetchSavedApiAccounts]);
+
+  // Initial load of all accounts balance
+  useEffect(() => {
+    fetchAllAccountsBalance();
+  }, [fetchAllAccountsBalance]);
 
   // Debounced auto-save of configuration & parameters to SQLite
   useEffect(() => {
@@ -4083,6 +4140,35 @@ export default function App() {
       {/* Header */}
       <header className="flex flex-col md:flex-row md:items-center justify-between border-b border-[#232326] pb-3 gap-4 animate-in fade-in duration-300">
         <div className="flex flex-wrap items-center gap-3">
+          {/* Card 0: 全账户信息 */}
+          <button
+            onClick={() => {
+              setActiveMainTab('ACCOUNTS');
+            }}
+            id="btn-active-tab-accounts"
+            className={`flex items-center justify-center gap-2 px-3 rounded-xl border transition-all text-center relative overflow-hidden h-[50px] w-[205px] group cursor-pointer ${
+              activeMainTab === 'ACCOUNTS'
+              ? 'bg-[#3f51b5] border-[#3f51b5] shadow-lg shadow-[#3f51b5]/20 ring-1 ring-[#3f51b5]/30'
+              : 'bg-[#3f51b5]/15 border-[#3f51b5]/25 hover:border-[#3f51b5]/45 hover:bg-[#3f51b5]/25'
+            }`}
+          >
+            {activeMainTab === 'ACCOUNTS' && (
+              <div className="absolute top-0 left-0 w-1 h-full bg-white opacity-40 animate-pulse" />
+            )}
+            <div className={`p-1.5 rounded-lg transition-colors shrink-0 ${
+              activeMainTab === 'ACCOUNTS' ? 'bg-white/20 text-white' : 'bg-[#3f51b5]/15 text-[#3f51b5]/80 group-hover:text-[#3f51b5]'
+            }`}>
+              <Users size={16} className={activeMainTab === 'ACCOUNTS' ? 'fill-white/20' : 'fill-[#3f51b5]/10'} />
+            </div>
+            <div className="min-w-0">
+              <h3 className={`font-bold text-[18px] leading-none transition-colors ${
+                activeMainTab === 'ACCOUNTS' ? 'text-white' : 'text-[#3f51b5]/90 group-hover:text-[#3f51b5]'
+              }`}>
+                全账户信息
+              </h3>
+            </div>
+          </button>
+
           {/* Card 1: 交易辅助 */}
           <button
             onClick={() => {
@@ -4140,8 +4226,7 @@ export default function App() {
               </h3>
             </div>
           </button>
-        </div>
-        <div className="flex items-center gap-4">
+
           {/* Card 3: 报表统计 */}
           <button
             onClick={() => {
@@ -4170,6 +4255,8 @@ export default function App() {
               </h3>
             </div>
           </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
 
           {/* 一键静音 / 恢复组件 */}
           <button
@@ -4241,6 +4328,208 @@ export default function App() {
         </div>
       </header>
 
+      <div className={activeMainTab === 'ACCOUNTS' ? 'block animate-in fade-in duration-300' : 'hidden'}>
+        <div className="space-y-6">
+          {/* Dashboard Summary Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+            {/* Grand Total Card */}
+            <div className="financial-card p-4 flex flex-col justify-between border-l-4 border-l-indigo-500">
+              <span className="financial-label text-zinc-400">总资产合计</span>
+              <div className="text-xl font-mono font-bold text-indigo-400 mt-2">
+                {allAccountsGrandTotal.total.toFixed(2)} <span className="text-xs text-zinc-500 font-sans">USDT</span>
+              </div>
+              <span className="text-[10px] text-zinc-500 mt-1">现货 + 合约</span>
+            </div>
+
+            {/* Spot Total Card */}
+            <div className="financial-card p-4 flex flex-col justify-between border-l-4 border-l-zinc-500">
+              <span className="financial-label text-zinc-400">现货资产合计</span>
+              <div className="text-xl font-mono font-bold text-zinc-300 mt-2">
+                {allAccountsGrandTotal.spot.toFixed(2)} <span className="text-xs text-zinc-500 font-sans">USDT</span>
+              </div>
+              <span className="text-[10px] text-zinc-500 mt-1">Binance 现货</span>
+            </div>
+
+            {/* Futures Total Card */}
+            <div className="financial-card p-4 flex flex-col justify-between border-l-4 border-l-blue-500">
+              <span className="financial-label text-zinc-400">合约资产合计</span>
+              <div className="text-xl font-mono font-bold text-blue-400 mt-2">
+                {allAccountsGrandTotal.futures.toFixed(2)} <span className="text-xs text-zinc-500 font-sans">USDT</span>
+              </div>
+              <span className="text-[10px] text-zinc-500 mt-1">U本位合约保证金</span>
+            </div>
+
+            {/* Hist Pnl Card */}
+            <div className="financial-card p-4 flex flex-col justify-between border-l-4 border-l-emerald-500">
+              <span className="financial-label text-zinc-400">历史累计总盈亏</span>
+              <div className={`text-xl font-mono font-bold mt-2 ${
+                allAccountsGrandTotal.histPnL >= 0 ? 'text-emerald-500' : 'text-red-500'
+              }`}>
+                {allAccountsGrandTotal.histPnL >= 0 ? '+' : ''}{allAccountsGrandTotal.histPnL.toFixed(2)} <span className="text-xs text-zinc-500 font-sans">USDT</span>
+              </div>
+              <span className="text-[10px] text-zinc-500 mt-1">基于本地已平仓仓单</span>
+            </div>
+
+            {/* Hist Commission Card */}
+            <div className="financial-card p-4 flex flex-col justify-between border-l-4 border-l-amber-500">
+              <span className="financial-label text-zinc-400">历史累计总手续费</span>
+              <div className="text-xl font-mono font-bold text-amber-500 mt-2">
+                {allAccountsGrandTotal.histCommission.toFixed(2)} <span className="text-xs text-zinc-500 font-sans">USDT</span>
+              </div>
+              <span className="text-[10px] text-zinc-500 mt-1">平仓单手续费</span>
+            </div>
+
+            {/* Hist Funding Fee Card */}
+            <div className="financial-card p-4 flex flex-col justify-between border-l-4 border-l-red-500">
+              <span className="financial-label text-zinc-400">历史累计总资金费率</span>
+              <div className={`text-xl font-mono font-bold mt-2 ${
+                allAccountsGrandTotal.histFundingFee >= 0 ? 'text-red-400' : 'text-emerald-400'
+              }`}>
+                {allAccountsGrandTotal.histFundingFee.toFixed(2)} <span className="text-xs text-zinc-500 font-sans font-medium">USDT</span>
+              </div>
+              <span className="text-[10px] text-zinc-500 mt-1">正值支出 / 负值收入</span>
+            </div>
+          </div>
+
+          {/* Accounts List & Table */}
+          <div className="financial-card p-6 space-y-6">
+            <div className="flex justify-between items-center border-b border-[#232326] pb-4">
+              <div className="flex items-center gap-2">
+                <Users size={20} className="text-indigo-400" />
+                <h2 className="text-lg font-bold text-zinc-100">管理账户资产与累计历史报表</h2>
+              </div>
+              <div className="flex items-center gap-3">
+                <button 
+                  type="button"
+                  onClick={fetchAllAccountsBalance}
+                  disabled={isFetchingAllBalances}
+                  className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-xs font-semibold rounded-lg transition-all disabled:opacity-50 select-none cursor-pointer"
+                >
+                  <RefreshCw size={13} className={isFetchingAllBalances ? "animate-spin" : ""} />
+                  <span>手动刷新数据</span>
+                </button>
+              </div>
+            </div>
+
+            {allAccountsBalances.length === 0 ? (
+              <div className="py-16 text-center space-y-3 border border-dashed border-[#232326] rounded-xl bg-black/10">
+                <AlertCircle size={32} className="mx-auto text-zinc-600" />
+                <p className="text-sm text-zinc-400">暂无已保存账户，请先在 [交易辅助] 的 [币安 API 配置] 板块录入账户名</p>
+                <button 
+                  type="button" 
+                  onClick={() => setActiveMainTab('TRADE')}
+                  className="px-4 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold rounded-md border border-[#232326] transition-all cursor-pointer"
+                >
+                  去配置 API
+                </button>
+              </div>
+            ) : (
+              <div className="overflow-x-auto border border-[#232326] rounded-xl bg-black/10">
+                <table className="w-full text-left border-collapse font-mono text-xs">
+                  <thead>
+                    <tr className="bg-[#1C1C1E] text-zinc-400 uppercase tracking-wider text-[11px] font-bold border-b border-[#232326]">
+                      <th className="p-4 pl-6">管理账户名称</th>
+                      <th className="p-4 text-right">现货余额 (USDT)</th>
+                      <th className="p-4 text-right">合约余额 (USDT)</th>
+                      <th className="p-4 text-right">总资产合计 (USDT)</th>
+                      <th className="p-4 text-right">历史累计盈亏 (USDT)</th>
+                      <th className="p-4 text-right">历史累计手续费 (USDT)</th>
+                      <th className="p-4 text-right">历史累计资金费率 (USDT)</th>
+                      <th className="p-4 pr-6 text-center">API 连接状态</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#232326]">
+                    {allAccountsBalances.map((acc, idx) => (
+                      <tr key={idx} className="hover:bg-[#1C1C1E]/50 transition-colors">
+                        <td className="p-4 pl-6 text-zinc-200 font-bold max-w-[150px] truncate" title={acc.accountName}>
+                          {acc.accountName}
+                        </td>
+                        <td className="p-4 text-right text-zinc-300">
+                          {acc.status === 'error' ? (
+                            <span className="text-red-500 font-sans text-xs" title={acc.error}>异常</span>
+                          ) : (
+                            acc.spotBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                          )}
+                        </td>
+                        <td className="p-4 text-right text-zinc-300">
+                          {acc.status === 'error' ? (
+                            <span className="text-red-500 font-sans text-xs" title={acc.error}>异常</span>
+                          ) : (
+                            acc.futuresBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                          )}
+                        </td>
+                        <td className="p-4 text-right text-indigo-400 font-bold text-sm">
+                          {acc.status === 'error' ? (
+                            <span className="text-red-500 font-sans text-xs" title={acc.error}>异常</span>
+                          ) : (
+                            acc.totalBalance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                          )}
+                        </td>
+                        <td className={`p-4 text-right font-bold ${
+                          acc.histPnL >= 0 ? 'text-emerald-500' : 'text-red-500'
+                        }`}>
+                          {acc.histPnL >= 0 ? '+' : ''}{acc.histPnL.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+                        <td className="p-4 text-right text-amber-500 font-medium">
+                          {acc.histCommission.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+                        <td className={`p-4 text-right font-medium ${
+                          acc.histFundingFee >= 0 ? 'text-red-400' : 'text-emerald-400'
+                        }`}>
+                          {acc.histFundingFee.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+                        <td className="p-4 pr-6 text-center">
+                          {acc.status === 'error' ? (
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-red-500/10 text-red-500 text-[11px] font-sans border border-red-500/20" title={acc.error}>
+                              <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                              配置异常
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[11px] font-sans border border-emerald-500/20">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              连接成功
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-[#1C1C1E] border-t-2 border-[#232326] sticky bottom-0 text-xs font-bold">
+                    <tr className="text-zinc-200">
+                      <td className="p-4 pl-6 text-sm">合并总计</td>
+                      <td className="p-4 text-right text-zinc-300">
+                        {allAccountsGrandTotal.spot.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="p-4 text-right text-zinc-300">
+                        {allAccountsGrandTotal.futures.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="p-4 text-right text-indigo-400 text-sm">
+                        {allAccountsGrandTotal.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className={`p-4 text-right text-sm ${
+                        allAccountsGrandTotal.histPnL >= 0 ? 'text-emerald-500' : 'text-red-500'
+                      }`}>
+                        {allAccountsGrandTotal.histPnL >= 0 ? '+' : ''}
+                        {allAccountsGrandTotal.histPnL.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="p-4 text-right text-amber-500 text-sm">
+                        {allAccountsGrandTotal.histCommission.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className={`p-4 text-right text-sm ${
+                        allAccountsGrandTotal.histFundingFee >= 0 ? 'text-red-400' : 'text-emerald-400'
+                      }`}>
+                        {allAccountsGrandTotal.histFundingFee.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </td>
+                      <td className="p-4 pr-6 text-center text-zinc-500 font-sans text-xs">--</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className={activeMainTab === 'TRADE' ? 'block' : 'hidden'}>
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
           {/* Left Column: API & Config & Account */}
@@ -4297,6 +4586,117 @@ export default function App() {
                       <Plus size={14} className="stroke-[4.5]" />
                     </button>
                   </div>
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* All Accounts Information */}
+          <section className="financial-card p-5 space-y-4">
+            <div className="flex justify-between items-center border-b border-[#232326] pb-2">
+              <div className="flex items-center gap-2">
+                <Users size={18} className="text-[#039be5]" />
+                <h2 className="font-semibold text-zinc-200">全账户信息</h2>
+              </div>
+              <button 
+                type="button"
+                onClick={fetchAllAccountsBalance}
+                disabled={isFetchingAllBalances}
+                className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 active:scale-95 text-zinc-300 hover:text-white text-[11px] font-medium rounded transition-all disabled:opacity-50 select-none cursor-pointer"
+              >
+                <RefreshCw size={11} className={isFetchingAllBalances ? "animate-spin text-zinc-300" : "text-zinc-300"} />
+                <span>刷新</span>
+              </button>
+            </div>
+
+            {allAccountsBalances.length === 0 ? (
+              <div className="py-6 text-center space-y-1 border border-dashed border-[#232326] rounded-lg">
+                <AlertCircle size={20} className="mx-auto text-zinc-600" />
+                <p className="text-xs text-zinc-500">暂无已保存账户或加载失败</p>
+                <button 
+                  type="button" 
+                  onClick={fetchAllAccountsBalance}
+                  className="text-xs text-blue-500 hover:underline cursor-pointer"
+                >
+                  点击重试
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="overflow-x-auto max-h-[300px] border border-[#232326] rounded-lg">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-[#1C1C1E] text-zinc-500 uppercase tracking-wider text-[10px] border-b border-[#232326]">
+                      <tr>
+                        <th className="p-2 font-medium">账户名</th>
+                        <th className="p-2 text-right font-medium">现货</th>
+                        <th className="p-2 text-right font-medium">合约</th>
+                        <th className="p-2 text-right font-medium">总余额</th>
+                        <th className="p-2 text-right font-medium">累计盈亏</th>
+                        <th className="p-2 text-right font-medium">手续费</th>
+                        <th className="p-2 text-right font-medium">资金费</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#232326]">
+                      {allAccountsBalances.map((acc, idx) => (
+                        <tr key={idx} className="hover:bg-[#1C1C1E]/50">
+                          <td className="p-2 text-zinc-300 truncate max-w-[80px]" title={acc.accountName}>
+                            {acc.accountName}
+                          </td>
+                          <td className="p-2 text-right text-zinc-400">
+                            {acc.status === 'error' ? (
+                              <span className="text-red-500 text-[10px]" title={acc.error}>异常</span>
+                            ) : (
+                              acc.spotBalance.toFixed(1)
+                            )}
+                          </td>
+                          <td className="p-2 text-right text-zinc-400">
+                            {acc.status === 'error' ? (
+                              <span className="text-red-500 text-[10px]" title={acc.error}>异常</span>
+                            ) : (
+                              acc.futuresBalance.toFixed(1)
+                            )}
+                          </td>
+                          <td className="p-2 text-right text-indigo-400 font-bold">
+                            {acc.status === 'error' ? (
+                              <span className="text-red-500 text-[10px]" title={acc.error}>异常</span>
+                            ) : (
+                              acc.totalBalance.toFixed(1)
+                            )}
+                          </td>
+                          <td className={`p-2 text-right font-bold ${
+                            acc.histPnL >= 0 ? 'text-emerald-500' : 'text-red-500'
+                          }`}>
+                            {acc.histPnL >= 0 ? '+' : ''}{acc.histPnL.toFixed(1)}
+                          </td>
+                          <td className="p-2 text-right text-amber-500">
+                            {acc.histCommission.toFixed(1)}
+                          </td>
+                          <td className={`p-2 text-right ${
+                            acc.histFundingFee >= 0 ? 'text-red-400' : 'text-emerald-400'
+                          }`}>
+                            {acc.histFundingFee.toFixed(1)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-[#1C1C1E] border-t-2 border-[#232326] sticky bottom-0 text-[11px]">
+                      <tr className="font-bold text-zinc-300">
+                        <td className="p-2">总计</td>
+                        <td className="p-2 text-right text-zinc-300">{allAccountsGrandTotal.spot.toFixed(1)}</td>
+                        <td className="p-2 text-right text-zinc-300">{allAccountsGrandTotal.futures.toFixed(1)}</td>
+                        <td className="p-2 text-right text-indigo-400">{allAccountsGrandTotal.total.toFixed(1)}</td>
+                        <td className={`p-2 text-right ${allAccountsGrandTotal.histPnL >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                          {allAccountsGrandTotal.histPnL >= 0 ? '+' : ''}{allAccountsGrandTotal.histPnL.toFixed(1)}
+                        </td>
+                        <td className="p-2 text-right text-amber-500">
+                          {allAccountsGrandTotal.histCommission.toFixed(1)}
+                        </td>
+                        <td className={`p-2 text-right ${allAccountsGrandTotal.histFundingFee >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+                          {allAccountsGrandTotal.histFundingFee.toFixed(1)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
                 </div>
               </div>
             )}

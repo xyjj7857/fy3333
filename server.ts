@@ -1329,6 +1329,134 @@ async function startServer() {
     }
   });
 
+  // Fetch Spot and Futures balance for all managed accounts
+  app.get("/api/all-accounts-balance", async (req, res) => {
+    try {
+      const rows = db.prepare("SELECT * FROM api_credentials ORDER BY account_name ASC").all() as any[];
+      if (rows.length === 0) {
+        return res.json({
+          accounts: [],
+          grandTotalSpot: 0,
+          grandTotalFutures: 0,
+          grandTotal: 0,
+          grandTotalHistPnL: 0,
+          grandTotalHistCommission: 0,
+          grandTotalHistFundingFee: 0
+        });
+      }
+
+      const results = await Promise.all(rows.map(async (r) => {
+        const accountName = r.account_name;
+        const apiKey = r.api_key ? decrypt(r.api_key) : "";
+        const apiSecret = r.api_secret ? decrypt(r.api_secret) : "";
+        const baseUrl = r.base_url || "https://fapi-gcp.binance.com";
+
+        // Query historical statistics from local position_history table
+        const stats = db.prepare(`
+          SELECT 
+            SUM(pnl) as totalPnl, 
+            SUM(commission) as totalCommission, 
+            SUM(fundingFee) as totalFundingFee 
+          FROM position_history 
+          WHERE account = ?
+        `).get(accountName) as any;
+
+        const histPnL = stats?.totalPnl || 0;
+        const histCommission = stats?.totalCommission || 0;
+        const histFundingFee = stats?.totalFundingFee || 0;
+
+        if (!apiKey || !apiSecret) {
+          return {
+            accountName,
+            spotBalance: 0,
+            futuresBalance: 0,
+            totalBalance: 0,
+            histPnL,
+            histCommission,
+            histFundingFee,
+            status: "error",
+            error: "缺少 API Key 或 Secret Key"
+          };
+        }
+
+        let spotBalance = 0;
+        let futuresBalance = 0;
+        let spotError = null;
+        let futuresError = null;
+
+        // Fetch Spot
+        try {
+          const spotData = await binanceSignedRequest('/api/v3/account', {}, apiKey, apiSecret, "https://api.binance.com");
+          if (spotData && Array.isArray(spotData.balances)) {
+            const usdtSpot = spotData.balances.find((b: any) => b.asset === 'USDT');
+            if (usdtSpot) {
+              spotBalance = parseFloat(usdtSpot.free) + parseFloat(usdtSpot.locked);
+            }
+          }
+        } catch (err: any) {
+          spotError = err.message || err;
+        }
+
+        // Fetch Futures
+        try {
+          const futuresData = await binanceSignedRequest('/fapi/v2/balance', {}, apiKey, apiSecret, baseUrl);
+          if (Array.isArray(futuresData)) {
+            const usdtFutures = futuresData.find((b: any) => b.asset === 'USDT');
+            if (usdtFutures) {
+              futuresBalance = parseFloat(usdtFutures.balance);
+            }
+          }
+        } catch (err: any) {
+          futuresError = err.message || err;
+        }
+
+        const totalBalance = spotBalance + futuresBalance;
+        const isError = spotError && futuresError;
+        
+        return {
+          accountName,
+          spotBalance,
+          futuresBalance,
+          totalBalance,
+          histPnL,
+          histCommission,
+          histFundingFee,
+          status: isError ? "error" : "success",
+          error: isError ? `现货和合约均获取失败: ${spotError} | ${futuresError}` : (spotError ? `现货获取失败: ${spotError}` : (futuresError ? `合约获取失败: ${futuresError}` : undefined))
+        };
+      }));
+
+      let grandTotalSpot = 0;
+      let grandTotalFutures = 0;
+      let grandTotal = 0;
+      let grandTotalHistPnL = 0;
+      let grandTotalHistCommission = 0;
+      let grandTotalHistFundingFee = 0;
+
+      results.forEach(acc => {
+        grandTotalSpot += acc.spotBalance;
+        grandTotalFutures += acc.futuresBalance;
+        grandTotal += acc.totalBalance;
+        grandTotalHistPnL += acc.histPnL;
+        grandTotalHistCommission += acc.histCommission;
+        grandTotalHistFundingFee += acc.histFundingFee;
+      });
+
+      res.json({
+        accounts: results,
+        grandTotalSpot,
+        grandTotalFutures,
+        grandTotal,
+        grandTotalHistPnL,
+        grandTotalHistCommission,
+        grandTotalHistFundingFee
+      });
+    } catch (error: any) {
+      console.error("Failed to fetch all accounts balance:", error);
+      res.status(500).json({ error: error.message || "Internal Server Error" });
+    }
+  });
+
   // Delete a saved credential
   app.delete("/api/api-credentials", (req, res) => {
     try {
