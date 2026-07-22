@@ -3037,13 +3037,15 @@ export default function App() {
         method: 'POST'
       });
       if (res.ok) {
-        addLog('强制同步成功！本日全部账户订单已成功轮询一轮并写入数据库，查询已停止。', 'SUCCESS');
-        await loadPositionHistory();
-        await fetchAvailableAccounts();
-        await fetchAllAccountsBalance();
+        addLog('强制同步已在后台成功启动！系统将按顺序遍历每一个账户，全部账户遍历完 1 轮后自动彻底停止。', 'SUCCESS');
+        setTimeout(async () => {
+          await loadPositionHistory();
+          await fetchAvailableAccounts();
+          await fetchAllAccountsBalance();
+        }, 5000);
       } else {
         const errData = await res.json().catch(() => ({}));
-        addLog(`强制同步提示: ${errData.error || '服务器对账异常'}`, 'ERROR');
+        addLog(`强制同步提示: ${errData.error || '单轮同步正在处理中'}`, 'WARNING');
       }
     } catch (err: any) {
       addLog(`强制同步失败: ${err.message || err}`, 'ERROR');

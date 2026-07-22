@@ -1064,12 +1064,12 @@ async function syncAccountsForRange(targetStart: number, targetEnd: number, labe
 
     // Rate-limiting delay before the next account to protect Binance weights
     if (i < accounts.length - 1) {
-      addMonitorLog(`[${label}] 防限速避让：等待 3 秒后继续同步下一个账户...`, "INFO");
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      addMonitorLog(`[${label}] 防限速避让：等待 1 秒后继续同步下一个账户...`, "INFO");
+      await new Promise(resolve => setTimeout(resolve, 1000));
     }
   }
 
-    addMonitorLog(`[${label}] 全账户单轮同步全部圆满完成，流程停止。`, "SUCCESS");
+    addMonitorLog(`[${label}] 🎉 全账户单轮同步全部圆满完成（共处理 ${accounts.length} 个账户），流程已自动停止，等待下次手动触发。`, "SUCCESS");
     return { busy: false, count: accounts.length };
   } finally {
     isPositionHistorySyncing = false;
@@ -1367,16 +1367,33 @@ async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow
     targetPrevDayEnd = Date.UTC(todayCstYear, todayCstMonth, todayCstDate, 8, 0, 0, 0) - 8 * 60 * 60 * 1000;
   }
 
-  await syncAccountsForRange(targetPrevDayStart, targetPrevDayEnd, "Auto Sync");
+  const syncRes = await syncAccountsForRange(targetPrevDayStart, targetPrevDayEnd, "Auto Sync");
+
+  if (syncRes && syncRes.busy) {
+    addMonitorLog(`[Auto Sync] 仓位历史记录同步任务繁忙 (busy)，放弃安排与发送本次邮件，避免重复发送。`, "WARNING");
+    return;
+  }
 
   addMonitorLog(`[Auto Sync] 仓位历史记录同步完毕！等待 1 分钟 (60 秒) 后将自动刷新「全账户信息」并发送邮件 [猛虎之翼]...`, "INFO");
 
   setTimeout(async () => {
     try {
       addMonitorLog(`[Auto Sync Mail] 1 分钟等待结束，正在自动刷新获取最新「全账户信息」...`, "INFO");
-      const accountData = await fetchAllAccountsBalanceInternal();
+      let accountData = await fetchAllAccountsBalanceInternal();
+
+      // Retry fetching balance if response is empty or invalid
+      if (!accountData || !accountData.accounts || accountData.accounts.length === 0) {
+        addMonitorLog(`[Auto Sync Mail] 首次获取全账户数据为空，等待 5 秒后重试...`, "WARNING");
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        accountData = await fetchAllAccountsBalanceInternal();
+      }
+
+      if (!accountData || !accountData.accounts || accountData.accounts.length === 0) {
+        addMonitorLog(`[Auto Sync Mail Error] 重试后全账户数据仍为空，放弃发送邮件以防空文报表。`, "ERROR");
+        return;
+      }
       
-      addMonitorLog(`[Auto Sync Mail] 已获取最新全账户数据，正在发送邮件 [猛虎之翼] 至 yyb_cq@outlook.com...`, "INFO");
+      addMonitorLog(`[Auto Sync Mail] 已获取最新全账户数据 (共 ${accountData.accounts.length} 个账户)，正在发送邮件 [猛虎之翼] 至 yyb_cq@outlook.com...`, "INFO");
       const mailRes = await sendAccountReportEmail(accountData);
       if (mailRes && mailRes.success) {
         addMonitorLog(`[Auto Sync Mail] 邮件 [猛虎之翼] 成功发送给 yyb_cq@outlook.com！`, "SUCCESS");
@@ -1388,54 +1405,49 @@ async function executeDailyAutoSync(syncTimezone: string, localNow: Date, cstNow
   }, 60000);
 }
 
+let isDailyAutoSyncRunning = false;
+
 function initDailyAutoSync() {
   console.log("[Auto Sync Initializer] Daily position history auto-sync initialized (Checked every 30 seconds).");
   
   setInterval(async () => {
-    const now = new Date();
-    const localHour = now.getHours();
-    const localMinute = now.getMinutes();
+    if (isDailyAutoSyncRunning) return;
 
+    const now = new Date();
     const utc8Date = new Date(now.getTime() + (8 * 60 + now.getTimezoneOffset()) * 60000);
     const cstHour = utc8Date.getHours();
     const cstMinute = utc8Date.getMinutes();
 
-    let triggerSync = false;
-    let syncBaseDateStr = "";
-    let syncTimezone = "";
-
-    if (localHour === 8 && localMinute === 18) {
-      const yyyy = now.getFullYear();
-      const mm = String(now.getMonth() + 1).padStart(2, '0');
-      const dd = String(now.getDate()).padStart(2, '0');
-      syncBaseDateStr = `${yyyy}-${mm}-${dd}_local`;
-      triggerSync = true;
-      syncTimezone = "Local Server Time";
-    } else if (cstHour === 8 && cstMinute === 18) {
-      const yyyy = utc8Date.getFullYear();
-      const mm = String(utc8Date.getMonth() + 1).padStart(2, '0');
-      const dd = String(utc8Date.getDate()).padStart(2, '0');
-      syncBaseDateStr = `${yyyy}-${mm}-${dd}_cst`;
-      triggerSync = true;
-      syncTimezone = "China Standard Time (UTC+8)";
+    // Trigger exclusively at 08:18 CST (Beijing Time)
+    if (cstHour !== 8 || cstMinute !== 18) {
+      return;
     }
 
-    if (!triggerSync) return;
+    const yyyy = utc8Date.getFullYear();
+    const mm = String(utc8Date.getMonth() + 1).padStart(2, '0');
+    const dd = String(utc8Date.getDate()).padStart(2, '0');
+    const syncDateKey = `${yyyy}-${mm}-${dd}`;
 
     try {
       const row = db.prepare("SELECT value FROM settings WHERE key = ?").get("last_auto_sync_date") as { value: string } | undefined;
-      if (row && row.value === syncBaseDateStr) {
+      if (row && (row.value === syncDateKey || row.value.startsWith(syncDateKey))) {
         return;
       }
 
-      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("last_auto_sync_date", syncBaseDateStr);
+      // Record standard CST date key to guarantee strict once-per-day execution
+      db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run("last_auto_sync_date", syncDateKey);
       
-      addMonitorLog(`[Auto Sync] 触发每日自动同步定时任务（触发时区: ${syncTimezone}, 批次标识: ${syncBaseDateStr}）`, "INFO");
+      isDailyAutoSyncRunning = true;
+      addMonitorLog(`[Auto Sync] 触发每日 08:18 自动同步任务（日期: ${syncDateKey} CST）`, "INFO");
 
-      executeDailyAutoSync(syncTimezone, now, utc8Date).catch(err => {
-        console.error("[Auto Sync Error] Execution failed:", err);
-        addMonitorLog(`[Auto Sync Error] 定时自动同步执行失败: ${err.message || err}`, "ERROR");
-      });
+      executeDailyAutoSync("China Standard Time (UTC+8)", now, utc8Date)
+        .catch(err => {
+          console.error("[Auto Sync Error] Execution failed:", err);
+          addMonitorLog(`[Auto Sync Error] 定时自动同步执行失败: ${err.message || err}`, "ERROR");
+        })
+        .finally(() => {
+          isDailyAutoSyncRunning = false;
+        });
 
     } catch (e: any) {
       console.error("[Auto Sync] Database check/save failed:", e);
@@ -1746,7 +1758,7 @@ async function startServer() {
   app.post("/api/position-history/force-sync", async (req, res) => {
     try {
       if (isPositionHistorySyncing) {
-        return res.status(409).json({ error: "后台已有正在执行的同步任务，请勿重复点击。" });
+        return res.status(409).json({ error: "单轮同步正在后台处理中（正在挨个同步各个账户），完成后会自动停止，请勿重复操作。" });
       }
 
       const now = new Date();
@@ -1760,13 +1772,13 @@ async function startServer() {
 
       addMonitorLog(`[Force Sync] 收到前端强制同步请求，开始按账户顺序进行单轮历史订单同步...`, "INFO");
       
-      const syncRes = await syncAccountsForRange(todayStart, todayEnd, "Force Sync");
-      
-      if (syncRes && syncRes.busy) {
-        return res.status(409).json({ error: "后台已有正在执行的同步任务。" });
-      }
+      // Execute in background without holding HTTP connection open
+      syncAccountsForRange(todayStart, todayEnd, "Force Sync").catch(err => {
+        console.error("[Force Sync Error]", err);
+        addMonitorLog(`[Force Sync Error] 强制同步过程中出现异常: ${err.message || err}`, "ERROR");
+      });
 
-      res.json({ status: "success", message: "单轮全账户强制同步已完成，已停止查询。" });
+      res.json({ status: "success", message: "单轮全账户强制同步已在后台启动，依次遍历所有账户后将自动停止。" });
     } catch (error: any) {
       console.error("Force sync failed:", error);
       res.status(500).json({ error: error.message });
