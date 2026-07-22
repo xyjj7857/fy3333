@@ -33,7 +33,9 @@ import {
   Bell,
   Trash2,
   Users,
-  Mail
+  Mail,
+  Calendar,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ApiConfig, OrderForm, Position, TradeLog, AccountBalance, OpenOrder, PositionHistory } from './types';
@@ -263,6 +265,8 @@ export default function App() {
   const [availableAccounts, setAvailableAccounts] = useState<string[]>([]);
 
   // 走势分析状态
+  const [reportStartDate, setReportStartDate] = useState<string>('');
+  const [reportEndDate, setReportEndDate] = useState<string>('');
   const [trendInitialBalance, setTrendInitialBalance] = useState<number>(200);
   const [trendOpacity, setTrendOpacity] = useState<number>(40);
   const [trendChartType, setTrendChartType] = useState<'candle' | 'line'>('candle');
@@ -617,13 +621,32 @@ export default function App() {
   const [transferAmount, setTransferAmount] = useState('');
   const [isTransferring, setIsTransferring] = useState(false);
 
-  // 过滤后的仓位历史记录 (按选中的账户过滤)
+  // 过滤后的仓位历史记录 (按选中的账户与统计时间区间过滤)
   const filteredHistory = React.useMemo(() => {
-    if (selectedAccounts.length === 0) {
-      return positionHistory;
+    let list = positionHistory;
+
+    // 1. 按已勾选的账户过滤 (未单独勾选账户时默认全部)
+    if (selectedAccounts.length > 0) {
+      list = list.filter(h => h.account && selectedAccounts.includes(h.account));
     }
-    return positionHistory.filter(h => h.account && selectedAccounts.includes(h.account));
-  }, [positionHistory, selectedAccounts]);
+
+    // 2. 按统计时间选择过滤 (精确到日)
+    if (reportStartDate) {
+      const startTs = new Date(`${reportStartDate}T00:00:00`).getTime();
+      if (!isNaN(startTs)) {
+        list = list.filter(h => (h.closeTime || h.timestamp || 0) >= startTs);
+      }
+    }
+
+    if (reportEndDate) {
+      const endTs = new Date(`${reportEndDate}T23:59:59.999`).getTime();
+      if (!isNaN(endTs)) {
+        list = list.filter(h => (h.closeTime || h.timestamp || 0) <= endTs);
+      }
+    }
+
+    return list;
+  }, [positionHistory, selectedAccounts, reportStartDate, reportEndDate]);
 
   // Calculate win/loss streaks for the chart
   const chartData = React.useMemo(() => {
@@ -3110,6 +3133,43 @@ export default function App() {
                         className="w-20 bg-transparent text-xs text-emerald-400 font-mono focus:outline-none focus:ring-0 font-semibold"
                       />
                       <span className="text-[10px] text-zinc-500 font-mono">USDT</span>
+                    </div>
+
+                    {/* Date range filter (统计时间选择) */}
+                    <div className="flex flex-wrap items-center gap-2 bg-[#141416]/80 px-3 py-1.5 rounded-lg border border-[#232326]">
+                      <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+                        <Calendar size={13} className="text-emerald-500" />
+                        <span className="whitespace-nowrap">统计时间:</span>
+                      </div>
+                      <input 
+                        type="date"
+                        value={reportStartDate}
+                        onChange={(e) => setReportStartDate(e.target.value)}
+                        className="bg-[#1a1a1e] text-xs text-zinc-200 font-mono px-2 py-0.5 rounded border border-[#2a2a2e] focus:outline-none focus:border-emerald-500/50 [color-scheme:dark]"
+                        title="开始日期"
+                      />
+                      <span className="text-xs text-zinc-500">至</span>
+                      <input 
+                        type="date"
+                        value={reportEndDate}
+                        onChange={(e) => setReportEndDate(e.target.value)}
+                        className="bg-[#1a1a1e] text-xs text-zinc-200 font-mono px-2 py-0.5 rounded border border-[#2a2a2e] focus:outline-none focus:border-emerald-500/50 [color-scheme:dark]"
+                        title="结束日期"
+                      />
+                      {(reportStartDate || reportEndDate) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setReportStartDate('');
+                            setReportEndDate('');
+                          }}
+                          className="flex items-center gap-1 px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-[11px] rounded transition-all cursor-pointer border border-zinc-700/50 ml-1"
+                          title="清空日期筛选，恢复统计全部订单"
+                        >
+                          <X size={12} />
+                          <span>全部时间</span>
+                        </button>
+                      )}
                     </div>
                   </>
                 )}
